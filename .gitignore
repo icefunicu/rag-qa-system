@@ -1,0 +1,17 @@
+# Go
+go-api/bin/
+go-api/coverage.out
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Environment and local overrides
+.env
+.env.local
+
+# Docker
+*.log
+
