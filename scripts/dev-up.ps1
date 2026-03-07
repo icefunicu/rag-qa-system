@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$NoBuild,
+    [switch]$SkipPull,
     [switch]$SkipFrontend,
     [switch]$SkipHealthCheck,
     [switch]$AttachLogs,
@@ -17,50 +18,60 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Get-RepoRoot
 Set-Location $repoRoot
 
-Write-Host "[INFO] Repo root: $repoRoot"
+Write-Info "Repo root: $repoRoot"
 Assert-DockerReady
 Assert-EnvFile
+Assert-LocalOllamaReady
 
 $services = Get-ComposeServices
-Write-Host "[INFO] Compose services: $($services -join ', ')"
+Write-Info "Compose services: $($services -join ', ')"
 
-$composeArgs = @("up", "-d", "--remove-orphans")
+if ($SkipPull) {
+    Write-Info "Skipping remote image pull."
+}
+else {
+    Write-Info "Pulling latest prebuilt images..."
+    Invoke-DockerCompose -Arguments @("pull", "--ignore-buildable", "--include-deps", "--policy", "always")
+}
+
 if ($NoBuild) {
-    Write-Host "[INFO] Skipping image build."
+    Write-Info "Skipping local image build."
 }
 else {
-    $composeArgs += "--build"
-    Write-Host "[INFO] Building changed images before startup."
+    Write-Info "Building local images with the latest base layers..."
+    Invoke-DockerCompose -Arguments @("build", "--pull")
 }
 
-Write-Host "[INFO] Starting Docker services..."
-Invoke-DockerCompose -Arguments $composeArgs
+Reset-ComposeOneShotServices -ServiceNames @("db-migrate", "minio-init")
 
-if (-not $SkipHealthCheck) {
-    Write-Host "[INFO] Waiting for core HTTP services..."
+Write-Info "Starting Docker services..."
+Invoke-DockerCompose -Arguments @("up", "-d", "--remove-orphans")
+
+if ($SkipHealthCheck) {
+    Write-Info "Health checks skipped."
+}
+else {
+    Write-Info "Waiting for core HTTP services..."
     Wait-CoreServices -RetryCount $RetryCount -RetryIntervalSeconds $RetryIntervalSeconds
-}
-else {
-    Write-Host "[INFO] Health checks skipped."
 }
 
 $frontendInfo = $null
 if ($SkipFrontend) {
-    Write-Host "[INFO] Frontend startup skipped."
+    Write-Info "Frontend startup skipped."
 }
 else {
     $frontendInfo = Start-ManagedFrontend -Port $FrontendPort -WaitUntilReady:(-not $SkipHealthCheck) -RetryCount $RetryCount -RetryIntervalSeconds $RetryIntervalSeconds
 }
 
 Write-Host ""
-Write-Host "[INFO] Active containers:"
+Write-Info "Active containers:"
 Invoke-DockerCompose -Arguments @("ps")
 
 Write-ProjectSummary -FrontendPort $FrontendPort -FrontendSkipped:$SkipFrontend -FrontendInfo $frontendInfo
 
 if ($AttachLogs) {
     $logsScript = Join-Path $repoRoot "logs.bat"
-    Write-Host "[INFO] Attaching real-time logs. Press Ctrl+C to stop log streaming."
+    Write-Info "Attaching real-time logs. Press Ctrl+C to stop log streaming."
     & $logsScript -f
     if ($LASTEXITCODE -notin @(0, 130)) {
         throw "Real-time log viewer exited with code $LASTEXITCODE."

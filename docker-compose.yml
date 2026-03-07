@@ -1,18 +1,61 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
-    image: postgres:16
+    build:
+      context: ./infra/postgres
+      dockerfile: postgres.Dockerfile
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-rag}
       POSTGRES_USER: ${POSTGRES_USER:-rag}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-rag}" ]
       interval: 5s
       timeout: 5s
       retries: 15
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    mem_limit: 512m
+    mem_reservation: 256m
+    cpus: 1.0
+    logging: *default-logging
+
+  db-migrate:
+    build:
+      context: .
+      dockerfile: scripts/db-migrate.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/db-migrate.sh
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+    mem_limit: 128m
+    mem_reservation: 64m
+    cpus: 0.5
+    logging: *default-logging
 
   redis:
     image: redis:7-alpine
@@ -21,6 +64,15 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+    mem_limit: 128m
+    mem_reservation: 64m
+    cpus: 0.5
+    logging: *default-logging
 
   qdrant:
     image: qdrant/qdrant:v1.13.6
@@ -28,6 +80,15 @@ services:
       - "6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    mem_limit: 1g
+    mem_reservation: 512m
+    cpus: 1.0
+    logging: *default-logging
 
   minio:
     image: minio/minio:RELEASE.2025-02-03T21-03-04Z
@@ -40,6 +101,15 @@ services:
       - "19001:9001"
     volumes:
       - minio_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    mem_limit: 256m
+    mem_reservation: 128m
+    cpus: 0.5
+    logging: *default-logging
 
   minio-init:
     image: minio/mc:RELEASE.2025-02-08T19-14-21Z
@@ -54,20 +124,34 @@ services:
         mc mb --ignore-existing local/${S3_BUCKET:-rag-raw}
         mc anonymous set private local/${S3_BUCKET:-rag-raw}
     restart: "no"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+    mem_limit: 64m
+    mem_reservation: 32m
+    cpus: 0.25
+    logging: *default-logging
 
   py-rag-service:
     build:
       context: ./services/py-rag-service
     environment:
       PYTHONUNBUFFERED: "1"
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgres://rag:rag@postgres:5432/rag?sslmode=disable}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-rag_chunks}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-256}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-text-embedding-3-small}
-      LLM_CHAT_MODEL: ${LLM_CHAT_MODEL:-gpt-4o-mini}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-0}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      CHAT_PROVIDER: ${CHAT_PROVIDER:-openai}
+      CHAT_BASE_URL: ${CHAT_BASE_URL:-}
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-gpt-4o-mini}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
       LLM_RETRY_DELAY_MILLISECONDS: ${LLM_RETRY_DELAY_MILLISECONDS:-600}
@@ -84,11 +168,16 @@ services:
       QUERY_CACHE_ENABLED: ${QUERY_CACHE_ENABLED:-true}
       QUERY_CACHE_TTL_HOURS: ${QUERY_CACHE_TTL_HOURS:-24}
       QUERY_CACHE_MAX_SIZE: ${QUERY_CACHE_MAX_SIZE:-10000}
+      SPARSE_RETRIEVAL_ENABLED: ${SPARSE_RETRIEVAL_ENABLED:-true}
+      SPARSE_CACHE_TTL_SECONDS: ${SPARSE_CACHE_TTL_SECONDS:-600}
+      SPARSE_CACHE_MAX_SCOPES: ${SPARSE_CACHE_MAX_SCOPES:-16}
       DEFAULT_CHUNK_SIZE: ${DEFAULT_CHUNK_SIZE:-1024}
       DEFAULT_CHUNK_OVERLAP: ${DEFAULT_CHUNK_OVERLAP:-100}
       INTENT_CLASSIFICATION_ENABLED: ${INTENT_CLASSIFICATION_ENABLED:-true}
       METADATA_ENHANCEMENT_ENABLED: ${METADATA_ENHANCEMENT_ENABLED:-true}
       MAX_KEYWORDS: ${MAX_KEYWORDS:-5}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     depends_on:
@@ -96,6 +185,15 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.5"
+    mem_limit: 1g
+    mem_reservation: 512m
+    cpus: 1.5
+    logging: *default-logging
 
   py-worker:
     build:
@@ -114,11 +212,26 @@ services:
       S3_USE_SSL: ${S3_USE_SSL:-false}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-rag_chunks}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-256}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-text-embedding-3-small}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-0}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-16}
+      EMBEDDING_BATCH_MAX_CHARS: ${EMBEDDING_BATCH_MAX_CHARS:-24000}
+      EMBEDDING_KEEP_ALIVE: ${EMBEDDING_KEEP_ALIVE:-30m}
+      EMBEDDING_TIMEOUT_SECONDS: ${EMBEDDING_TIMEOUT_SECONDS:-120}
+      LONG_TEXT_MODE_ENABLED: ${LONG_TEXT_MODE_ENABLED:-true}
+      LONG_TEXT_THRESHOLD_CHARS: ${LONG_TEXT_THRESHOLD_CHARS:-250000}
+      LONG_TEXT_CHUNK_SIZE: ${LONG_TEXT_CHUNK_SIZE:-2048}
+      LONG_TEXT_CHUNK_OVERLAP: ${LONG_TEXT_CHUNK_OVERLAP:-32}
+      LONG_TEXT_EMBEDDING_BATCH_SIZE: ${LONG_TEXT_EMBEDDING_BATCH_SIZE:-96}
+      LONG_TEXT_EMBEDDING_BATCH_MAX_CHARS: ${LONG_TEXT_EMBEDDING_BATCH_MAX_CHARS:-256000}
+      LONG_TEXT_SPARSE_ONLY_ENABLED: ${LONG_TEXT_SPARSE_ONLY_ENABLED:-true}
+      LONG_TEXT_SPARSE_ONLY_THRESHOLD_CHARS: ${LONG_TEXT_SPARSE_ONLY_THRESHOLD_CHARS:-2000000}
+      LONG_TEXT_SPARSE_CHUNK_CHARS: ${LONG_TEXT_SPARSE_CHUNK_CHARS:-4096}
+      LONG_TEXT_SPARSE_CHUNK_OVERLAP_CHARS: ${LONG_TEXT_SPARSE_CHUNK_OVERLAP_CHARS:-256}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
       LLM_RETRY_DELAY_MILLISECONDS: ${LLM_RETRY_DELAY_MILLISECONDS:-600}
@@ -127,26 +240,48 @@ services:
       DEFAULT_CHUNK_OVERLAP: ${DEFAULT_CHUNK_OVERLAP:-100}
       METADATA_ENHANCEMENT_ENABLED: ${METADATA_ENHANCEMENT_ENABLED:-true}
       MAX_KEYWORDS: ${MAX_KEYWORDS:-5}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       minio:
         condition: service_started
       qdrant:
         condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.5"
+    mem_limit: 1g
+    mem_reservation: 512m
+    cpus: 1.5
+    logging: *default-logging
 
   nginx:
-    image: nginx:alpine
+    build:
+      context: ./infra/nginx
+      dockerfile: nginx.Dockerfile
     ports:
       - "80:80"
-    volumes:
-      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       go-api:
         condition: service_started
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+    mem_limit: 64m
+    mem_reservation: 32m
+    cpus: 0.25
+    logging: *default-logging
 
   go-api:
     build:
@@ -179,36 +314,25 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       minio:
         condition: service_started
       py-rag-service:
         condition: service_started
-
-  # 日志收集服务 - 实时聚合所有容器日志
-  log-collector:
-    image: alpine:latest
-    command: >
-      sh -c " mkdir -p /logs/by-service /logs/by-level /logs/all; touch /logs/all/combined.log /logs/error.log; echo 'Log collector started at $$(date)'; while true; do
-        for service in go-api py-rag-service py-worker; do
-          if docker compose logs --tail=0 $$service 2>/dev/null; then
-            sleep 1;
-          fi;
-        done;
-        sleep 5;
-      done "
-    volumes:
-      - logs_data:/logs
-    depends_on:
-      - go-api
-      - py-rag-service
-      - py-worker
-    profiles:
-      - logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+    mem_limit: 256m
+    mem_reservation: 128m
+    cpus: 1.0
+    logging: *default-logging
 
 volumes:
   postgres_data:
   qdrant_data:
   minio_data:
-  logs_data:

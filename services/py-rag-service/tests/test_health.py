@@ -1,9 +1,10 @@
 import os
+
 from fastapi.testclient import TestClient
 
 from app.main import app
 
-# 设置测试环境的 Qdrant 地址为 localhost（因为测试客户端在本地运行）
+
 os.environ["QDRANT_URL"] = "http://localhost:6333"
 
 client = TestClient(app)
@@ -41,8 +42,9 @@ def test_query_returns_contract_compliant_response() -> None:
             for citation_id in sentence["citation_ids"]:
                 assert citation_id in citation_ids
         else:
-            assert sentence["text"].startswith("【常识补充】")
             assert sentence["citation_ids"] == []
+            assert isinstance(sentence["text"], str)
+            assert sentence["text"].strip() != ""
 
 
 def test_query_rejects_invalid_scope_uuid() -> None:

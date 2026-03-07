@@ -2,51 +2,27 @@ openapi: 3.0.3
 info:
   title: RAG-QA System API
   description: |
-    企业级 RAG（检索增强生成）问答系统 API
-    
-    ## 核心功能
-    - 用户认证与授权
-    - 知识库管理（CRUD）
-    - 文档上传与处理
-    - 智能问答与引用溯源
-    - 流式问答（SSE）
-    - 查询缓存优化
-    
-    ## 服务架构
-    - **go-api**: REST API 网关 (Port 8080)
-    - **py-rag-service**: RAG 检索与问答服务 (Port 8000)
-    - **py-worker**: 异步文档处理 Worker
-    - **PostgreSQL**: 元数据存储
-    - **Redis**: 任务队列
-    - **Qdrant**: 向量数据库
-    - **MinIO**: 对象存储
-    
-    ## 认证方式
-    所有受保护端点需要在请求头中携带 Bearer Token:
-    ```
-    Authorization: Bearer <access_token>
-    ```
-    
-    ## 获取 Token
-    POST /v1/auth/login
-    
-    ## 流式问答
-    RAG 服务支持 SSE 流式输出，可通过以下端点使用:
-    - `GET /v1/rag/query/stream` - URL 参数方式
-    - `POST /v1/rag/query/stream` - JSON body 方式
-    
-  version: 2.2.0
+    RAG-QA System 的公开接口说明。
+
+    这份 OpenAPI 文档覆盖 Go API Gateway 对外暴露的主接口，并保留 Python RAG Service 的内部问答接口说明。
+
+    说明：
+    - 除 `/healthz` 外，Go API 业务接口统一挂在 `/v1` 前缀下
+    - `/healthz` 实际访问地址为 `http://localhost:8080/healthz`
+    - Bearer Token 通过 `POST /v1/auth/login` 获取
+    - 文档上传采用“申请预签名地址 -> 直传对象存储 -> 通知创建入库任务”的两段式流程
+    - 大型 TXT 文档预览可能返回 `preview_mode=partial`
+    - 更适合人阅读的说明见 `docs/API_SPECIFICATION.md`
+
+  version: 1.0.0
   contact:
     name: RAG-QA Team
-  license:
-    name: MIT
-    url: https://opensource.org/licenses/MIT
 
 servers:
   - url: http://localhost:8080/v1
-    description: Local development
-  - url: http://localhost:8080
-    description: Production (without /v1 prefix)
+    description: Go API Gateway (本地开发)
+  - url: http://localhost:8000
+    description: Python RAG Service（内部或联调时使用）
 
 tags:
   - name: Health
@@ -417,7 +393,7 @@ paths:
       tags:
         - Documents
       summary: 获取文档预览
-      description: 获取文档预览内容 (TXT 返回文本，PDF/DOCX 返回预签名 URL)
+      description: 获取文档预览内容 (TXT 返回已解码文本或只读部分预览，PDF/DOCX 返回预签名 URL)
       operationId: getDocumentPreview
       security:
         - bearerAuth: []
@@ -514,6 +490,10 @@ paths:
                   summary: 内容过大
                   value:
                     error: content too large for online edit, max 1048576 bytes
+                documentTooLarge:
+                  summary: 文档超出 inline 编辑限制
+                  value:
+                    error: document too large for online edit, max 1048576 bytes
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -831,6 +811,97 @@ paths:
                 citations: []
                 allow_common_knowledge: false
 
+    get:
+      tags:
+        - Chat
+      summary: 获取会话消息
+      description: 获取指定会话中的所有历史消息记录
+      operationId: listMessages
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageListResponse'
+        '400':
+          description: 参数错误
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 会话不存在
+
+  /chat/sessions/{session_id}/messages/stream:
+    post:
+      tags:
+        - Chat
+      summary: 流式发送问题
+      description: 发送问题并通过 SSE 流式获取助手回答
+      operationId: createMessageStream
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMessageRequest'
+      responses:
+        '200':
+          description: SSE 流响应
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: 参数错误
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /chat/messages/{message_id}/feedback:
+    post:
+      tags:
+        - Chat
+      summary: 创建消息反馈
+      description: 记录用户对某条系统回答的点赞或点踩，以及标签和可选评论
+      operationId: createFeedback
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateFeedbackRequest'
+      responses:
+        '201':
+          description: 记录成功
+        '400':
+          description: 参数错误
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1065,14 +1136,14 @@ components:
           $ref: '#/components/schemas/Document'
         preview_mode:
           type: string
-          enum: [text, url]
-          description: text=文本预览，url=URL 预览
+          enum: [text, partial, url]
+          description: text=完整文本预览，partial=只读部分/大文本预览，url=URL 预览
         editable:
           type: boolean
           description: 是否支持在线编辑 (仅 TXT 支持)
         text:
           type: string
-          description: 文本内容 (preview_mode=text 时返回)
+          description: 文本内容 (preview_mode=text/partial 时返回)
         view_url:
           type: string
           format: uri
@@ -1080,9 +1151,21 @@ components:
         content_type:
           type: string
           example: text/plain; charset=utf-8
+        detected_encoding:
+          type: string
+          description: 后端识别出的原始文本编码
+        truncated:
+          type: boolean
+          description: 是否仅返回了前 max_partial_bytes 字节的预览
+        warning:
+          type: string
+          description: 只读/截断预览提示
         max_inline_bytes:
           type: integer
           description: 最大内联字节数
+        max_partial_bytes:
+          type: integer
+          description: 最大部分预览字节数
         expires_in_seconds:
           type: integer
           description: URL 过期时间 (秒)
@@ -1203,15 +1286,133 @@ components:
         id:
           type: string
           format: uuid
+        document_id:
+          type: string
+          format: uuid
         status:
           type: string
-          enum: [queued, running, done, failed]
+          enum: [queued, running, done, failed, dead_letter, cancelled]
         progress:
           type: integer
           minimum: 0
           maximum: 100
           description: 处理进度百分比
 
+        error_message:
+          type: string
+        error_category:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        runtime_progress:
+          allOf:
+            - $ref: '#/components/schemas/RuntimeProgress'
+          nullable: true
+
+    RuntimeProgress:
+      type: object
+      required:
+        - job_id
+        - status
+        - overall_progress
+        - stage
+        - updated_at
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        overall_progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        stage:
+          type: string
+        message:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        details:
+          $ref: '#/components/schemas/RuntimeProgressDetails'
+
+    RuntimeProgressDetails:
+      type: object
+      additionalProperties: true
+      properties:
+        processed_chunks:
+          type: integer
+          minimum: 0
+        total_chunks:
+          type: integer
+          minimum: 0
+        processed_batches:
+          type: integer
+          minimum: 0
+        total_batches:
+          type: integer
+          minimum: 0
+        current_batch:
+          type: integer
+          minimum: 0
+        current_batch_size:
+          type: integer
+          minimum: 0
+        stage_progress_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        vector_count:
+          type: integer
+          minimum: 0
+        chunk_count:
+          type: integer
+          minimum: 0
+        expected_point_count:
+          type: integer
+          minimum: 0
+        qdrant_point_count:
+          type: integer
+          minimum: 0
+        db_chunk_count:
+          type: integer
+          minimum: 0
+        segment_count:
+          type: integer
+          minimum: 0
+        batch_size:
+          type: integer
+          minimum: 1
+        batch_max_chars:
+          type: integer
+          minimum: 1
+        provider:
+          type: string
+        model:
+          type: string
+        file_type:
+          type: string
+        storage_key:
+          type: string
+        error_category:
+          type: string
+        retry_count:
+          type: integer
+          minimum: 0
+        max_retries:
+          type: integer
+          minimum: 0
+        document_id:
+          type: string
+          format: uuid
+        embedding_dim:
+          type: integer
+          minimum: 0
     # Chat
     ChatSession:
       type: object
@@ -1318,6 +1519,54 @@ components:
             $ref: '#/components/schemas/Citation'
         allow_common_knowledge:
           type: boolean
+
+    ChatMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+        content:
+          type: string
+        scope_payload:
+          type: string
+        answer_payload:
+          type: string
+        trace_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          
+    MessageListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        count:
+          type: integer
+
+    CreateFeedbackRequest:
+      type: object
+      required:
+        - rating
+      properties:
+        rating:
+          type: integer
+          description: 1 为赞, -1 为踩
+        tags:
+          type: array
+          items:
+            type: string
+        comment:
+          type: string
 
     AnswerSentence:
       type: object

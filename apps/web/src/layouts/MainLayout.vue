@@ -18,6 +18,10 @@
             <el-icon><Files /></el-icon>
             <template #title>知识库管理</template>
           </el-menu-item>
+          <el-menu-item v-if="authStore.isAdmin()" index="/dashboard/evaluation" class="menu-item-custom">
+            <el-icon><DataLine /></el-icon>
+            <template #title>评测与监控</template>
+          </el-menu-item>
         </el-menu>
       </div>
 
@@ -57,7 +61,7 @@
 <script setup lang="ts">
 import { useAuthStore } from '@/store/auth';
 import { useRouter } from 'vue-router';
-import { ChatDotRound, Files, Platform, MoreFilled, SwitchButton } from '@element-plus/icons-vue';
+import { ChatDotRound, Files, DataLine, Platform, MoreFilled, SwitchButton } from '@element-plus/icons-vue';
 import { computed } from 'vue';
 
 const authStore = useAuthStore();
@@ -246,5 +250,24 @@ const handleCommand = (command: string) => {
 .fade-transform-leave-to {
   opacity: 0;
   transform: translateY(-15px);
+}
+
+/* 响应式移动端适配补充 */
+@media screen and (max-width: 768px) {
+  .app-sidebar {
+    width: 60px !important;
+  }
+  .sidebar-header h2 {
+    display: none;
+  }
+  .menu-item-custom :deep(.el-menu-item__title) {
+    display: none;
+  }
+  .user-info {
+    display: none;
+  }
+  .logo-circle-mini {
+    margin-right: 0;
+  }
 }
 </style>

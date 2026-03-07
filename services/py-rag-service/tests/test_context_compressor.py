@@ -209,7 +209,7 @@ class TestLLMBasedCompressor:
         """测试 LLM 压缩（使用 mock）"""
         mock_llm_gateway = MagicMock(spec=LLMGateway)
         mock_config = MagicMock()
-        mock_config.llm_chat_model = "test-model"
+        mock_config.chat_model = "test-model"
         mock_llm_gateway._cfg = mock_config
         
         mock_response = {
@@ -292,7 +292,7 @@ class TestContextCompressor:
         """测试 LLM 模式压缩器"""
         mock_llm_gateway = MagicMock(spec=LLMGateway)
         mock_config = MagicMock()
-        mock_config.llm_chat_model = "test-model"
+        mock_config.chat_model = "test-model"
         mock_llm_gateway._cfg = mock_config
         
         mock_response = {

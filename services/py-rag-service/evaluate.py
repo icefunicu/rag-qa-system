@@ -82,6 +82,7 @@ def run_batch_evaluation(
         print(f"  {metric_name}: {value:.4f}")
 
     print(f"\n生成评估报告：{output_path}")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     evaluator.generate_report(result, output_path)
 
     return result
@@ -258,8 +259,8 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="evaluation_report.json",
-        help="输出报告路径（默认：evaluation_report.json）",
+        default="docs/reports/evaluation/evaluation_report.json",
+        help="输出报告路径（默认：docs/reports/evaluation/evaluation_report.json）",
     )
 
     parser.add_argument(

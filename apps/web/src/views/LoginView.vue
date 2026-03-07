@@ -33,7 +33,7 @@
       <!-- Optional: Remember me & Forgot Password Row -->
       <div class="form-actions">
         <el-checkbox v-model="rememberMe">Remember me</el-checkbox>
-        <el-link type="primary" :underline="false">Forgot password?</el-link>
+        <el-link type="primary" underline="never">Forgot password?</el-link>
       </div>
 
       <el-form-item class="submit-item">

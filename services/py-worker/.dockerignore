@@ -1,3 +1,29 @@
-.pytest_cache/
+# Python 缓存
 __pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# 测试文件
 tests/
+
+# 版本控制
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 虚拟环境
+.venv/
+venv/
+
+# 其他
+*.md
+*.txt
+!requirements.runtime.txt
+Dockerfile
+.dockerignore

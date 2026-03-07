@@ -145,28 +145,39 @@ func (s *S3Client) NewDownloadURL(ctx context.Context, storageKey string) (strin
 	return url.String(), nil
 }
 
-func (s *S3Client) ReadObjectText(ctx context.Context, storageKey string, maxBytes int64) (string, error) {
+func (s *S3Client) ReadObjectText(ctx context.Context, storageKey string, maxBytes int64, allowTruncated bool) (TextReadResult, error) {
 	if strings.TrimSpace(storageKey) == "" {
-		return "", errors.New("storage_key is required")
+		return TextReadResult{}, errors.New("storage_key is required")
 	}
 	if maxBytes <= 0 {
-		return "", errors.New("maxBytes must be positive")
+		return TextReadResult{}, errors.New("maxBytes must be positive")
 	}
 
 	object, err := s.internal.GetObject(ctx, s.bucket, storageKey, minio.GetObjectOptions{})
 	if err != nil {
-		return "", fmt.Errorf("get object failed: %w", err)
+		return TextReadResult{}, fmt.Errorf("get object failed: %w", err)
 	}
 	defer object.Close()
 
 	payload, err := io.ReadAll(io.LimitReader(object, maxBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("read object failed: %w", err)
+		return TextReadResult{}, fmt.Errorf("read object failed: %w", err)
 	}
-	if int64(len(payload)) > maxBytes {
-		return "", ErrObjectTooLarge
+
+	truncated := int64(len(payload)) > maxBytes
+	if truncated {
+		if !allowTruncated {
+			return TextReadResult{}, ErrObjectTooLarge
+		}
+		payload = payload[:int(maxBytes)]
 	}
-	return string(payload), nil
+
+	text, detectedEncoding := decodeTextPayload(payload)
+	return TextReadResult{
+		Text:      text,
+		Encoding:  detectedEncoding,
+		Truncated: truncated,
+	}, nil
 }
 
 func (s *S3Client) PutObjectText(ctx context.Context, storageKey, content string) (int64, error) {

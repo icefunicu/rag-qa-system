@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_LOG_FILE = REPO_ROOT / "logs" / "dev" / "frontend.log"
 SERVICE_PATTERN = re.compile(r"^([^\s]+)\s+\|\s+(.*)$")
 TIMESTAMP_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
+ANSI_PATTERN = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 LEVEL_RANKS = {
     "DEBUG": 10,
     "INFO": 20,
@@ -49,7 +50,7 @@ def build_logs_command(
     tail: int = 100,
     follow: bool = False,
 ) -> list[str]:
-    cmd = ["docker", "compose", "logs", "--no-color", "--tail", str(tail)]
+    cmd = ["docker", "compose", "logs", "--no-color", "--timestamps", "--tail", str(tail)]
     if follow:
         cmd.append("--follow")
     if services:
@@ -194,7 +195,10 @@ def colorize_line(line: str, parsed: dict[str, object]) -> str:
 
 
 def format_frontend_line(line: str) -> str:
-    return f"frontend | {line.rstrip()}"
+    cleaned = ANSI_PATTERN.sub("", line).rstrip()
+    cleaned = cleaned.replace("鉃?", ">")
+    cleaned = re.sub(r"^[^A-Za-z/\[]*(Local:|Network:|press\s)", r"> \1", cleaned)
+    return f"frontend | {cleaned}"
 
 
 def read_frontend_tail_lines(path: Path, tail: int) -> list[str]:

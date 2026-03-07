@@ -89,3 +89,4 @@ data/
 # === Agents / Subsystems ===
 agent_runs/
 .trae/
+.kiro/

@@ -38,22 +38,24 @@ type CreateCorpusInput struct {
 }
 
 type CreateDocumentInput struct {
-	CorpusID   string
-	FileName   string
-	FileType   string
-	SizeBytes  int64
-	StorageKey string
-	CreatedBy  string
+	CorpusID    string
+	FileName    string
+	FileType    string
+	SizeBytes   int64
+	StorageKey  string
+	ContentHash string
+	CreatedBy   string
 }
 
 type IngestJob struct {
-	ID         string    `json:"id"`
-	DocumentID string    `json:"document_id"`
-	Status     string    `json:"status"`
-	Progress   int       `json:"progress"`
-	ErrorMsg   string    `json:"error_message,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	DocumentID    string    `json:"document_id"`
+	Status        string    `json:"status"`
+	Progress      int       `json:"progress"`
+	ErrorMsg      string    `json:"error_message,omitempty"`
+	ErrorCategory string    `json:"error_category,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type ChatSession struct {
@@ -354,6 +356,23 @@ func (s *Store) CreateDocumentAndJob(ctx context.Context, input CreateDocumentIn
 		return "", IngestJob{}, err
 	}
 
+	if contentHash := strings.TrimSpace(input.ContentHash); contentHash != "" {
+		_, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO document_versions (id, document_id, version, content_hash, storage_key, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			uuid.NewString(),
+			documentID,
+			1,
+			contentHash,
+			input.StorageKey,
+			now,
+		)
+		if err != nil {
+			return "", IngestJob{}, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return "", IngestJob{}, err
 	}
@@ -371,14 +390,14 @@ func (s *Store) CreateDocumentAndJob(ctx context.Context, input CreateDocumentIn
 func (s *Store) GetIngestJob(ctx context.Context, jobID string) (IngestJob, error) {
 	row := s.db.QueryRowContext(
 		ctx,
-		`SELECT id, document_id, status, progress, COALESCE(error_message, ''), created_at, updated_at
+		`SELECT id, document_id, status, progress, COALESCE(error_message, ''), COALESCE(error_category, ''), created_at, updated_at
 		 FROM ingest_jobs
 		 WHERE id = $1`,
 		jobID,
 	)
 
 	var job IngestJob
-	if err := row.Scan(&job.ID, &job.DocumentID, &job.Status, &job.Progress, &job.ErrorMsg, &job.CreatedAt, &job.UpdatedAt); err != nil {
+	if err := row.Scan(&job.ID, &job.DocumentID, &job.Status, &job.Progress, &job.ErrorMsg, &job.ErrorCategory, &job.CreatedAt, &job.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return IngestJob{}, ErrNotFound
 		}
@@ -518,7 +537,7 @@ func (s *Store) HasActiveIngestJob(ctx context.Context, documentID string) (bool
 	return exists, err
 }
 
-func (s *Store) CreateReingestJobForDocument(ctx context.Context, documentID string, sizeBytes int64) (IngestJob, error) {
+func (s *Store) CreateReingestJobForDocument(ctx context.Context, documentID string, sizeBytes int64, contentHash, storageKey string) (IngestJob, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return IngestJob{}, err
@@ -560,6 +579,34 @@ func (s *Store) CreateReingestJobForDocument(ctx context.Context, documentID str
 	)
 	if err != nil {
 		return IngestJob{}, err
+	}
+
+	trimmedHash := strings.TrimSpace(contentHash)
+	if trimmedHash != "" {
+		var nextVersion int
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT COALESCE(MAX(version), 0) + 1 FROM document_versions WHERE document_id = $1`,
+			documentID,
+		).Scan(&nextVersion); err != nil {
+			return IngestJob{}, err
+		}
+
+		_, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO document_versions (id, document_id, version, content_hash, storage_key, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6)
+			 ON CONFLICT (document_id, content_hash) DO NOTHING`,
+			uuid.NewString(),
+			documentID,
+			nextVersion,
+			trimmedHash,
+			storageKey,
+			now,
+		)
+		if err != nil {
+			return IngestJob{}, err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -693,6 +740,78 @@ func (s *Store) MarkIngestJobFailed(ctx context.Context, jobID, docID, errorMess
 	}
 
 	return tx.Commit()
+}
+
+// CancelIngestJob 将 ingest job 和关联文档标记为 cancelled，并记录事件
+func (s *Store) CancelIngestJob(ctx context.Context, jobID string) (string, string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	// 获取 job 的 document_id 和当前状态
+	var documentID, status string
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT document_id, status FROM ingest_jobs WHERE id = $1`,
+		jobID,
+	).Scan(&documentID, &status)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", ErrNotFound
+		}
+		return "", "", err
+	}
+
+	// 只能取消 queued 或 running 状态的 job
+	if status != "queued" && status != "running" {
+		return "", "", fmt.Errorf("job status is %s, only queued or running jobs can be cancelled", status)
+	}
+
+	// 更新 job 状态为 cancelled
+	_, err = tx.ExecContext(
+		ctx,
+		`UPDATE ingest_jobs
+		 SET status = 'cancelled', progress = 0, error_message = 'cancelled by user', updated_at = NOW()
+		 WHERE id = $1`,
+		jobID,
+	)
+	if err != nil {
+		return "", "", err
+	}
+
+	// 更新文档状态为 cancelled
+	_, err = tx.ExecContext(
+		ctx,
+		`UPDATE documents
+		 SET status = 'cancelled'
+		 WHERE id = $1`,
+		documentID,
+	)
+	if err != nil {
+		return "", "", err
+	}
+
+	// 记录取消事件
+	eventID := uuid.NewString()
+	_, err = tx.ExecContext(
+		ctx,
+		`INSERT INTO ingest_events (id, job_id, stage, message, created_at)
+		 VALUES ($1, $2, 'cancelled', 'job cancelled by user', NOW())`,
+		eventID, jobID,
+	)
+	if err != nil {
+		return "", "", err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", "", err
+	}
+
+	return documentID, status, nil
 }
 
 func buildInClause(start int, values []string) (string, []any) {

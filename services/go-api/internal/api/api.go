@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -102,6 +104,7 @@ func (a *API) Router() http.Handler {
 			r.Delete("/corpora/{corpusID}", a.handleDeleteCorpus)
 			r.Get("/corpora/{corpusID}/documents", a.handleListCorpusDocuments)
 			r.Get("/documents/{documentID}", a.handleGetDocumentDetail)
+			r.Get("/documents/{documentID}/events", a.handleListDocumentEvents)
 			r.Get("/documents/{documentID}/preview", a.handleGetDocumentPreview)
 			r.Delete("/documents/{documentID}", a.handleDeleteDocument)
 			r.Put("/documents/{documentID}/content", a.handleUpdateDocumentContent)
@@ -109,10 +112,21 @@ func (a *API) Router() http.Handler {
 			r.Post("/documents/upload-url", a.handleCreateUploadURL)
 			r.Post("/documents/upload", a.handleUploadDocument)
 			r.Get("/ingest-jobs/{jobID}", a.handleGetIngestJob)
+			r.Post("/ingest-jobs/{jobID}/cancel", a.handleCancelIngestJob)
+
+			r.Post("/documents/batch-delete", a.handleBatchDeleteDocuments)
+
+			r.Group(func(r chi.Router) {
+				r.Use(a.requireAdmin)
+				r.Get("/admin/logs", a.handleAdminLogs)
+			})
 
 			r.Post("/chat/sessions", a.handleCreateSession)
 			r.Get("/chat/sessions", a.handleListSessions)
 			r.Post("/chat/sessions/{sessionID}/messages", a.handleCreateMessage)
+			r.Get("/chat/sessions/{sessionID}/messages", a.handleListMessages)
+			r.Post("/chat/sessions/{sessionID}/messages/stream", a.handleCreateMessageStream)
+			r.Post("/chat/messages/{messageID}/feedback", a.handleCreateFeedback)
 		})
 	})
 
@@ -143,14 +157,24 @@ func (a *API) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
+func (a *API) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := r.Context().Value(claimsKey).(auth.Claims)
+		if !ok || claims.Role != auth.RoleAdmin {
+			writeError(w, http.StatusForbidden, "admin access required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func mustClaims(ctx context.Context) auth.Claims {
 	claims, _ := ctx.Value(claimsKey).(auth.Claims)
 	return claims
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
-	// 简单健康检查
-	if r.URL.Query().Get("depth") == "basic" {
+	if r.URL.Query().Get("depth") != "full" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":  "ok",
 			"service": "go-api",
@@ -159,66 +183,126 @@ func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 深度健康检查 - 检查所有依赖服务
 	checks := make(map[string]any)
+	degradedServices := make([]string, 0, 3)
+	suggestions := make([]string, 0, 3)
 	overallStatus := "ok"
+	checkClient := &http.Client{Timeout: 2 * time.Second}
+	checkCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
 
-	// 检查 PostgreSQL
 	dbStatus := "ok"
-	if err := a.store.DB().PingContext(r.Context()); err != nil {
+	if err := a.store.DB().PingContext(checkCtx); err != nil {
 		dbStatus = "unhealthy"
-		overallStatus = "degraded"
+		overallStatus = "unhealthy"
+		suggestions = append(suggestions, "Check PostgreSQL availability and connection pool saturation.")
 		a.logger.Printf("[health] postgres ping failed: %v", err)
 	}
 	checks["postgres"] = dbStatus
 
-	// 检查 Redis
 	redisStatus := "ok"
 	if a.publisher != nil {
-		if err := a.publisher.Client().Ping(r.Context()).Err(); err != nil {
+		if err := a.publisher.Client().Ping(checkCtx).Err(); err != nil {
 			redisStatus = "unhealthy"
-			overallStatus = "degraded"
+			if overallStatus != "unhealthy" {
+				overallStatus = "degraded"
+			}
+			degradedServices = append(degradedServices, "redis")
+			suggestions = append(suggestions, "Check Redis queue connectivity before ingest traffic increases.")
 			a.logger.Printf("[health] redis ping failed: %v", err)
 		}
 	}
 	checks["redis"] = redisStatus
 
-	// 检查 RAG Service
 	ragStatus := "ok"
-	ragURL := a.cfg.RAGServiceURL + "/healthz"
-	resp, err := http.Get(ragURL)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	ragURL := strings.TrimRight(a.cfg.RAGServiceURL, "/") + "/healthz?depth=full"
+	resp, err := func() (*http.Response, error) {
+		req, reqErr := http.NewRequestWithContext(checkCtx, http.MethodGet, ragURL, nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		return checkClient.Do(req)
+	}()
+	if err != nil {
 		ragStatus = "unhealthy"
-		overallStatus = "degraded"
+		if overallStatus == "ok" {
+			overallStatus = "degraded"
+		}
+		degradedServices = append(degradedServices, "rag_service")
+		suggestions = append(suggestions, "Verify py-rag-service health and upstream model provider availability.")
 		a.logger.Printf("[health] rag service check failed: %v", err)
+	} else if resp.StatusCode != http.StatusOK {
+		ragStatus = "unhealthy"
+		if overallStatus == "ok" {
+			overallStatus = "degraded"
+		}
+		degradedServices = append(degradedServices, "rag_service")
+		suggestions = append(suggestions, "Verify py-rag-service health and upstream model provider availability.")
+		a.logger.Printf("[health] rag service returned status=%d", resp.StatusCode)
+		resp.Body.Close()
 	} else {
+		var ragPayload struct {
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&ragPayload); err != nil {
+			ragStatus = "unhealthy"
+			if overallStatus == "ok" {
+				overallStatus = "degraded"
+			}
+			degradedServices = append(degradedServices, "rag_service")
+			suggestions = append(suggestions, "Inspect py-rag-service /healthz response payload.")
+			a.logger.Printf("[health] rag service decode failed: %v", err)
+		} else if ragPayload.Status != "" && ragPayload.Status != "ok" {
+			ragStatus = ragPayload.Status
+			if overallStatus == "ok" {
+				overallStatus = "degraded"
+			}
+			degradedServices = append(degradedServices, "rag_service")
+		}
 		resp.Body.Close()
 	}
 	checks["rag_service"] = ragStatus
 
-	// 检查 Qdrant
 	qdrantStatus := "ok"
-	qdrantURL := a.cfg.QdrantURL + "/healthz"
-	resp, err = http.Get(qdrantURL)
+	qdrantURL := strings.TrimRight(a.cfg.QdrantURL, "/") + "/healthz"
+	resp, err = func() (*http.Response, error) {
+		req, reqErr := http.NewRequestWithContext(checkCtx, http.MethodGet, qdrantURL, nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		return checkClient.Do(req)
+	}()
 	if err != nil || resp.StatusCode != http.StatusOK {
 		qdrantStatus = "unhealthy"
-		overallStatus = "degraded"
+		if overallStatus == "ok" {
+			overallStatus = "degraded"
+		}
+		degradedServices = append(degradedServices, "qdrant")
+		suggestions = append(suggestions, "Check Qdrant availability or switch query traffic to degraded mode.")
 		a.logger.Printf("[health] qdrant check failed: %v", err)
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
 	} else {
 		resp.Body.Close()
 	}
 	checks["qdrant"] = qdrantStatus
 
-	// 构建响应
 	response := map[string]any{
 		"status":  overallStatus,
 		"service": "go-api",
 		"time":    time.Now().UTC().Format(time.RFC3339),
 		"checks":  checks,
 	}
+	if len(degradedServices) > 0 {
+		response["degraded"] = degradedServices
+	}
+	if len(suggestions) > 0 {
+		response["suggestions"] = suggestions
+	}
 
 	statusCode := http.StatusOK
-	if overallStatus == "degraded" {
+	if overallStatus == "unhealthy" {
 		statusCode = http.StatusServiceUnavailable
 	}
 
@@ -497,6 +581,114 @@ func (a *API) handleGetDocumentDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (a *API) handleListDocumentEvents(w http.ResponseWriter, r *http.Request) {
+	documentID := strings.TrimSpace(chi.URLParam(r, "documentID"))
+	if _, err := uuid.Parse(documentID); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid documentID")
+		return
+	}
+
+	if _, err := a.store.GetDocumentByID(r.Context(), documentID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "document not found")
+			return
+		}
+		a.logger.Printf("query document detail failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "query document detail failed")
+		return
+	}
+
+	job, err := a.store.GetIngestJobByDocumentID(r.Context(), documentID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"items": []any{},
+				"count": 0,
+			})
+			return
+		}
+		a.logger.Printf("query ingest job by document failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "query ingest job failed")
+		return
+	}
+
+	runtimeProgress, err := a.getRuntimeProgress(r.Context(), job.ID)
+	if err != nil {
+		a.logger.Printf("query runtime progress failed: jobID=%s err=%v", job.ID, err)
+		runtimeProgress = nil
+	}
+
+	events, err := a.store.ListIngestEventsByJobID(r.Context(), job.ID)
+	if err != nil {
+		a.logger.Printf("list ingest events failed: jobID=%s err=%v", job.ID, err)
+		writeError(w, http.StatusInternalServerError, "list ingest events failed")
+		return
+	}
+
+	items := make([]map[string]any, 0, len(events)+1)
+	for _, event := range events {
+		item := map[string]any{
+			"id":          event.ID,
+			"document_id": documentID,
+			"job_id":      event.JobID,
+			"status":      event.Stage,
+			"stage":       event.Stage,
+			"created_at":  event.CreatedAt,
+		}
+		if event.Message != nil && strings.TrimSpace(*event.Message) != "" {
+			item["message"] = *event.Message
+		}
+		items = append(items, item)
+	}
+
+	terminalStageExists := false
+	for _, item := range items {
+		status, _ := item["status"].(string)
+		if status == job.Status {
+			terminalStageExists = true
+			break
+		}
+	}
+	if job.ErrorMsg != "" || (!terminalStageExists && job.Status != "") {
+		details := map[string]any{
+			"progress": job.Progress,
+		}
+		if job.ErrorCategory != "" {
+			details["error_category"] = job.ErrorCategory
+		}
+		if job.ErrorMsg != "" {
+			details["error_message"] = job.ErrorMsg
+		}
+
+		item := map[string]any{
+			"id":          job.ID + "-status",
+			"document_id": documentID,
+			"job_id":      job.ID,
+			"status":      job.Status,
+			"stage":       job.Status,
+			"message":     strings.TrimSpace(job.ErrorMsg),
+			"details":     details,
+			"created_at":  job.UpdatedAt,
+		}
+		if item["message"] == "" {
+			delete(item, "message")
+		}
+		items = append(items, item)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":              items,
+		"count":              len(items),
+		"job_id":             job.ID,
+		"job_status":         job.Status,
+		"job_progress":       job.Progress,
+		"job_error_message":  job.ErrorMsg,
+		"job_error_category": job.ErrorCategory,
+		"job_updated_at":     job.UpdatedAt,
+		"job_runtime":        runtimeProgress,
+	})
+}
+
 func (a *API) handleGetDocumentPreview(w http.ResponseWriter, r *http.Request) {
 	documentID := strings.TrimSpace(chi.URLParam(r, "documentID"))
 	if _, err := uuid.Parse(documentID); err != nil {
@@ -522,74 +714,66 @@ func (a *API) handleGetDocumentPreview(w http.ResponseWriter, r *http.Request) {
 		documentID, claims.UserID, item.FileName, item.SizeBytes, item.FileType)
 
 	if item.FileType == "txt" {
-		if item.SizeBytes <= a.cfg.MaxInlineTextBytes {
-			s3Start := time.Now()
-			text, err := a.s3.ReadObjectText(r.Context(), item.StorageKey, a.cfg.MaxInlineTextBytes)
-			s3Duration := time.Since(s3Start)
+		previewLimit := a.cfg.MaxInlineTextBytes
+		previewMode := "text"
+		editable := true
+		if item.SizeBytes > a.cfg.MaxInlineTextBytes {
+			previewLimit = a.cfg.MaxPartialLoadBytes
+			previewMode = "partial"
+			editable = false
+		}
 
-			if err != nil {
-				if errors.Is(err, storage.ErrObjectTooLarge) {
-					a.logger.Printf("[preview] txt_too_large: documentID=%s user_id=%s size=%d limit=%d s3_ms=%d",
-						documentID, claims.UserID, item.SizeBytes, a.cfg.MaxInlineTextBytes, s3Duration.Milliseconds())
-					writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("txt content too large for inline view, max %d bytes", a.cfg.MaxInlineTextBytes))
-					return
-				}
-				a.logger.Printf("[preview] read_failed: documentID=%s user_id=%s err=%v s3_ms=%d",
-					documentID, claims.UserID, err, s3Duration.Milliseconds())
-				writeError(w, http.StatusInternalServerError, "read document content failed")
+		s3Start := time.Now()
+		textResult, err := a.s3.ReadObjectText(r.Context(), item.StorageKey, previewLimit, previewMode == "partial")
+		s3Duration := time.Since(s3Start)
+
+		if err != nil {
+			if errors.Is(err, storage.ErrObjectTooLarge) {
+				a.logger.Printf("[preview] txt_too_large: documentID=%s user_id=%s size=%d limit=%d s3_ms=%d",
+					documentID, claims.UserID, item.SizeBytes, previewLimit, s3Duration.Milliseconds())
+				writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("txt content too large for preview, max %d bytes", previewLimit))
 				return
 			}
-
-			a.logger.Printf("[preview] txt_inline: documentID=%s user_id=%s size=%d strategy=inline s3_ms=%d total_ms=%d",
-				documentID, claims.UserID, item.SizeBytes, s3Duration.Milliseconds(), time.Since(startTime).Milliseconds())
-			writeJSON(w, http.StatusOK, map[string]any{
-				"document":           item,
-				"preview_mode":       "text",
-				"editable":           true,
-				"text":               text,
-				"content_type":       "text/plain; charset=utf-8",
-				"max_inline_bytes":   a.cfg.MaxInlineTextBytes,
-				"expires_in_seconds": 0,
-			})
+			a.logger.Printf("[preview] read_failed: documentID=%s user_id=%s err=%v s3_ms=%d",
+				documentID, claims.UserID, err, s3Duration.Milliseconds())
+			writeError(w, http.StatusInternalServerError, "read document content failed")
 			return
 		}
 
-		if item.SizeBytes <= a.cfg.MaxPartialLoadBytes {
-			s3Start := time.Now()
-			text, err := a.s3.ReadObjectText(r.Context(), item.StorageKey, a.cfg.MaxPartialLoadBytes)
-			s3Duration := time.Since(s3Start)
-
-			if err != nil {
-				if errors.Is(err, storage.ErrObjectTooLarge) {
-					a.logger.Printf("[preview] txt_partial_failed: documentID=%s user_id=%s size=%d limit=%d s3_ms=%d",
-						documentID, claims.UserID, item.SizeBytes, a.cfg.MaxPartialLoadBytes, s3Duration.Milliseconds())
-					writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("txt content too large for partial load, max %d bytes", a.cfg.MaxPartialLoadBytes))
-					return
-				}
-				a.logger.Printf("[preview] read_failed: documentID=%s user_id=%s err=%v s3_ms=%d",
-					documentID, claims.UserID, err, s3Duration.Milliseconds())
-				writeError(w, http.StatusInternalServerError, "read document content failed")
-				return
+		warning := ""
+		if previewMode == "partial" {
+			if textResult.Truncated {
+				warning = fmt.Sprintf(
+					"File size (%d bytes) exceeds preview limit (%d bytes). Only showing the first %d bytes decoded as UTF-8.",
+					item.SizeBytes,
+					a.cfg.MaxPartialLoadBytes,
+					a.cfg.MaxPartialLoadBytes,
+				)
+			} else {
+				warning = fmt.Sprintf(
+					"File size (%d bytes) exceeds inline edit limit (%d bytes). Preview is read-only.",
+					item.SizeBytes,
+					a.cfg.MaxInlineTextBytes,
+				)
 			}
-
-			a.logger.Printf("[preview] txt_partial: documentID=%s user_id=%s size=%d strategy=partial s3_ms=%d total_ms=%d large_file_warning=true",
-				documentID, claims.UserID, item.SizeBytes, s3Duration.Milliseconds(), time.Since(startTime).Milliseconds())
-			writeJSON(w, http.StatusOK, map[string]any{
-				"document":           item,
-				"preview_mode":       "partial",
-				"editable":           false,
-				"text":               text,
-				"content_type":       "text/plain; charset=utf-8",
-				"max_inline_bytes":   a.cfg.MaxInlineTextBytes,
-				"max_partial_bytes":  a.cfg.MaxPartialLoadBytes,
-				"warning":            fmt.Sprintf("File size (%d bytes) exceeds inline limit (%d bytes). Only showing first %d bytes.", item.SizeBytes, a.cfg.MaxInlineTextBytes, a.cfg.MaxPartialLoadBytes),
-				"expires_in_seconds": 0,
-			})
-			return
 		}
 
-		a.logger.Printf("[preview] txt_url_fallback: documentID=%s user_id=%s size=%d strategy=url reason=size_exceeded limit=%d",
-			documentID, claims.UserID, item.SizeBytes, a.cfg.MaxPartialLoadBytes)
+		a.logger.Printf("[preview] txt_%s: documentID=%s user_id=%s size=%d encoding=%s truncated=%t s3_ms=%d total_ms=%d",
+			previewMode, documentID, claims.UserID, item.SizeBytes, textResult.Encoding, textResult.Truncated, s3Duration.Milliseconds(), time.Since(startTime).Milliseconds())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"document":           item,
+			"preview_mode":       previewMode,
+			"editable":           editable,
+			"text":               textResult.Text,
+			"content_type":       "text/plain; charset=utf-8",
+			"detected_encoding":  textResult.Encoding,
+			"truncated":          textResult.Truncated,
+			"max_inline_bytes":   a.cfg.MaxInlineTextBytes,
+			"max_partial_bytes":  a.cfg.MaxPartialLoadBytes,
+			"warning":            warning,
+			"expires_in_seconds": 0,
+		})
+		return
 	}
 
 	s3Start := time.Now()
@@ -645,6 +829,10 @@ func (a *API) handleUpdateDocumentContent(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "only txt document supports online edit")
 		return
 	}
+	if item.SizeBytes > a.cfg.MaxInlineTextBytes {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("document too large for online edit, max %d bytes", a.cfg.MaxInlineTextBytes))
+		return
+	}
 
 	content := req.Content
 	if strings.TrimSpace(content) == "" {
@@ -667,36 +855,39 @@ func (a *API) handleUpdateDocumentContent(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Anti-Split-Brain measure: pre-flight check before S3 commit
-	job, err := a.store.CreateReingestJobForDocument(r.Context(), documentID, int64(len([]byte(content))))
+	previousText, err := a.s3.ReadObjectText(r.Context(), item.StorageKey, a.cfg.MaxInlineTextBytes, false)
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "document not found")
-			return
-		}
-		a.logger.Printf("create reingest job failed: %v", err)
-		writeError(w, http.StatusInternalServerError, "create reingest job failed")
-		return
-	}
-
-	// We publish the job to redis FIRST. If it fails, S3 is untouched.
-	// If it succeeds, the worker will pickup the job but might wait or retry.
-	// Even if PutObjectText fails directly after, the worker just processes the old object data
-	// which is eventually consistent and prevents true data corruption.
-	if err := a.publisher.PublishIngestJob(r.Context(), job.ID); err != nil {
-		a.logger.Printf("enqueue reingest job failed: %v", err)
-		_ = a.store.MarkIngestJobFailed(r.Context(), job.ID, documentID, "enqueue ingest job failed (S3 update blocked)")
-		writeError(w, http.StatusServiceUnavailable, "enqueue ingest job failed")
+		a.logger.Printf("read previous document content failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "read previous document content failed")
 		return
 	}
 
 	sizeBytes, err := a.s3.PutObjectText(r.Context(), item.StorageKey, content)
 	if err != nil {
 		a.logger.Printf("update document object in S3 failed: %v", err)
-		// Since we already published the job, this is awkward, but it's safe -
-		// the DB simply re-indexes the old file, which is much better than indexing new DB stats but pointing to an old S3 object.
-		_ = a.store.MarkIngestJobFailed(r.Context(), job.ID, documentID, "S3 update failed after enqueueing")
 		writeError(w, http.StatusInternalServerError, "update storage object failed")
+		return
+	}
+
+	contentHash := hashTextContent(content)
+	job, err := a.store.CreateReingestJobForDocument(r.Context(), documentID, int64(len([]byte(content))), contentHash, item.StorageKey)
+	if err != nil {
+		a.logger.Printf("create reingest job with version failed: %v", err)
+		if _, restoreErr := a.s3.PutObjectText(r.Context(), item.StorageKey, previousText.Text); restoreErr != nil {
+			a.logger.Printf("restore previous document content failed after db rollback: %v", restoreErr)
+		}
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "document not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "create reingest job failed")
+		return
+	}
+
+	if err := a.publisher.PublishIngestJob(r.Context(), job.ID); err != nil {
+		a.logger.Printf("enqueue reingest job failed: %v", err)
+		_ = a.store.MarkIngestJobFailed(r.Context(), job.ID, documentID, "enqueue ingest job failed")
+		writeError(w, http.StatusServiceUnavailable, "enqueue ingest job failed")
 		return
 	}
 
@@ -769,11 +960,13 @@ func (a *API) handleUploadDocument(w http.ResponseWriter, r *http.Request) {
 	claims := mustClaims(r.Context())
 
 	var req struct {
-		CorpusID   string `json:"corpus_id"`
-		FileName   string `json:"file_name"`
-		FileType   string `json:"file_type"`
-		SizeBytes  int64  `json:"size_bytes"`
-		StorageKey string `json:"storage_key"`
+		CorpusID        string `json:"corpus_id"`
+		FileName        string `json:"file_name"`
+		FileType        string `json:"file_type"`
+		SizeBytes       int64  `json:"size_bytes"`
+		StorageKey      string `json:"storage_key"`
+		ContentHash     string `json:"content_hash"`
+		DuplicatePolicy string `json:"duplicate_policy"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
 		a.logger.Printf("[upload] decode_request_failed: user_id=%s err=%v", claims.UserID, err)
@@ -785,9 +978,21 @@ func (a *API) handleUploadDocument(w http.ResponseWriter, r *http.Request) {
 	req.FileName = strings.TrimSpace(req.FileName)
 	req.FileType = strings.TrimSpace(strings.ToLower(req.FileType))
 	req.StorageKey = strings.TrimSpace(req.StorageKey)
+	req.ContentHash = strings.TrimSpace(req.ContentHash)
+	req.DuplicatePolicy = strings.TrimSpace(strings.ToLower(req.DuplicatePolicy))
 
-	a.logger.Printf("[upload] request: user_id=%s corpusID=%s fileName=%s fileType=%s size=%d storageKey=%s",
-		claims.UserID, req.CorpusID, req.FileName, req.FileType, req.SizeBytes, req.StorageKey)
+	// 默认策略为 new_version
+	if req.DuplicatePolicy == "" {
+		req.DuplicatePolicy = "new_version"
+	}
+	validPolicies := map[string]bool{"reject": true, "reuse_index": true, "new_version": true}
+	if !validPolicies[req.DuplicatePolicy] {
+		writeError(w, http.StatusBadRequest, "duplicate_policy must be reject, reuse_index, or new_version")
+		return
+	}
+
+	a.logger.Printf("[upload] request: user_id=%s corpusID=%s fileName=%s fileType=%s size=%d storageKey=%s contentHash=%s dupPolicy=%s",
+		claims.UserID, req.CorpusID, req.FileName, req.FileType, req.SizeBytes, req.StorageKey, req.ContentHash, req.DuplicatePolicy)
 
 	if req.CorpusID == "" || req.FileName == "" || req.FileType == "" || req.StorageKey == "" {
 		a.logger.Printf("[upload] validation_failed: user_id=%s reason=missing_required_fields", claims.UserID)
@@ -841,14 +1046,76 @@ func (a *API) handleUploadDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ── 幂等保护：同一 storage_key 不重复创建 ──
+	existingDocID, err := a.store.GetDocumentByStorageKey(r.Context(), req.StorageKey)
+	if err == nil && existingDocID != "" {
+		a.logger.Printf("[upload] idempotent_hit: user_id=%s documentID=%s storageKey=%s", claims.UserID, existingDocID, req.StorageKey)
+		job, err := a.store.GetIngestJobByDocumentID(r.Context(), existingDocID)
+		if err == nil {
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"document_id":      existingDocID,
+				"job_id":           job.ID,
+				"status":           "queued",
+				"duplicate_policy": "idempotent",
+				"message":          "document metadata already accepted",
+			})
+			return
+		}
+	}
+
+	// ── 内容去重：按 content_hash 检查是否已有相同内容 ──
+	if req.ContentHash != "" {
+		dupDocID, dupErr := a.store.FindDocumentByContentHash(r.Context(), req.CorpusID, req.ContentHash)
+		if dupErr == nil && dupDocID != "" {
+			switch req.DuplicatePolicy {
+			case "reject":
+				a.logger.Printf("[upload] duplicate_rejected: user_id=%s corpusID=%s contentHash=%s existingDocID=%s",
+					claims.UserID, req.CorpusID, req.ContentHash, dupDocID)
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error":            "duplicate content detected",
+					"existing_doc_id":  dupDocID,
+					"duplicate_policy": "reject",
+					"content_hash":     req.ContentHash,
+				})
+				return
+
+			case "reuse_index":
+				a.logger.Printf("[upload] duplicate_reused: user_id=%s corpusID=%s contentHash=%s existingDocID=%s",
+					claims.UserID, req.CorpusID, req.ContentHash, dupDocID)
+				job, jobErr := a.store.GetIngestJobByDocumentID(r.Context(), dupDocID)
+				jobStatus := "unknown"
+				jobID := ""
+				if jobErr == nil {
+					jobStatus = job.Status
+					jobID = job.ID
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"document_id":      dupDocID,
+					"job_id":           jobID,
+					"status":           jobStatus,
+					"duplicate_policy": "reuse_index",
+					"content_hash":     req.ContentHash,
+					"message":          "identical content already indexed, reusing existing document",
+				})
+				return
+
+			case "new_version":
+				// 继续走正常创建流程，但会额外记录版本
+				a.logger.Printf("[upload] duplicate_new_version: user_id=%s corpusID=%s contentHash=%s existingDocID=%s",
+					claims.UserID, req.CorpusID, req.ContentHash, dupDocID)
+			}
+		}
+	}
+
 	startTime := time.Now()
 	documentID, job, err := a.store.CreateDocumentAndJob(r.Context(), db.CreateDocumentInput{
-		CorpusID:   req.CorpusID,
-		FileName:   req.FileName,
-		FileType:   req.FileType,
-		SizeBytes:  req.SizeBytes,
-		StorageKey: req.StorageKey,
-		CreatedBy:  claims.UserID,
+		CorpusID:    req.CorpusID,
+		FileName:    req.FileName,
+		FileType:    req.FileType,
+		SizeBytes:   req.SizeBytes,
+		StorageKey:  req.StorageKey,
+		ContentHash: req.ContentHash,
+		CreatedBy:   claims.UserID,
 	})
 	dbDuration := time.Since(startTime)
 
@@ -872,15 +1139,16 @@ func (a *API) handleUploadDocument(w http.ResponseWriter, r *http.Request) {
 	publishDuration := time.Since(publishStart)
 
 	totalDuration := time.Since(startTime)
-	a.logger.Printf("[upload] completed: user_id=%s documentID=%s jobID=%s fileName=%s size=%d db_ms=%d publish_ms=%d total_ms=%d status=queued",
+	a.logger.Printf("[upload] completed: user_id=%s documentID=%s jobID=%s fileName=%s size=%d db_ms=%d publish_ms=%d total_ms=%d status=queued dupPolicy=%s",
 		claims.UserID, documentID, job.ID, req.FileName, req.SizeBytes,
-		dbDuration.Milliseconds(), publishDuration.Milliseconds(), totalDuration.Milliseconds())
+		dbDuration.Milliseconds(), publishDuration.Milliseconds(), totalDuration.Milliseconds(), req.DuplicatePolicy)
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"document_id": documentID,
-		"job_id":      job.ID,
-		"status":      "queued",
-		"message":     "document metadata accepted and queued for indexing",
+		"document_id":      documentID,
+		"job_id":           job.ID,
+		"status":           "queued",
+		"duplicate_policy": req.DuplicatePolicy,
+		"message":          "document metadata accepted and queued for indexing",
 	})
 }
 
@@ -902,7 +1170,176 @@ func (a *API) handleGetIngestJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, job)
+	runtimeProgress, err := a.getRuntimeProgress(r.Context(), job.ID)
+	if err != nil {
+		a.logger.Printf("query runtime progress failed: jobID=%s err=%v", job.ID, err)
+		runtimeProgress = nil
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":               job.ID,
+		"document_id":      job.DocumentID,
+		"status":           job.Status,
+		"progress":         job.Progress,
+		"error_message":    job.ErrorMsg,
+		"error_category":   job.ErrorCategory,
+		"created_at":       job.CreatedAt,
+		"updated_at":       job.UpdatedAt,
+		"runtime_progress": runtimeProgress,
+	})
+}
+
+// handleCancelIngestJob 取消进行中的 ingest job 并清理已产生的垃圾资源
+func (a *API) handleCancelIngestJob(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r.Context())
+
+	jobID := strings.TrimSpace(chi.URLParam(r, "jobID"))
+	if _, err := uuid.Parse(jobID); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid jobID")
+		return
+	}
+
+	a.logger.Printf("[cancel] request: jobID=%s user_id=%s role=%s", jobID, claims.UserID, claims.Role)
+
+	// 将 job 标记为 cancelled（事务内同时更新 document 状态和写入 event）
+	documentID, previousStatus, err := a.store.CancelIngestJob(r.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
+		if strings.Contains(err.Error(), "only queued or running") {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		a.logger.Printf("[cancel] cancel job failed: jobID=%s err=%v", jobID, err)
+		writeError(w, http.StatusInternalServerError, "cancel job failed")
+		return
+	}
+
+	a.logger.Printf("[cancel] job cancelled: jobID=%s documentID=%s previousStatus=%s", jobID, documentID, previousStatus)
+
+	// 异步清理垃圾资源（Qdrant 向量 + S3 文件），不阻塞响应
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// 清理 Qdrant 中该文档的向量点
+		if err := a.purgeDocumentVectors(ctx, documentID); err != nil {
+			a.logger.Printf("[cancel] cleanup: purge qdrant failed: jobID=%s documentID=%s err=%v", jobID, documentID, err)
+		} else {
+			a.logger.Printf("[cancel] cleanup: qdrant purged: jobID=%s documentID=%s", jobID, documentID)
+		}
+
+		// 清理 S3 中的原始文件
+		doc, err := a.store.GetDocumentByID(ctx, documentID)
+		if err != nil {
+			a.logger.Printf("[cancel] cleanup: get document failed: jobID=%s documentID=%s err=%v", jobID, documentID, err)
+			return
+		}
+		if strings.TrimSpace(doc.StorageKey) != "" {
+			if err := a.s3.RemoveObject(ctx, doc.StorageKey); err != nil {
+				a.logger.Printf("[cancel] cleanup: remove s3 object failed: jobID=%s storageKey=%s err=%v", jobID, doc.StorageKey, err)
+			} else {
+				a.logger.Printf("[cancel] cleanup: s3 object removed: jobID=%s storageKey=%s", jobID, doc.StorageKey)
+			}
+		}
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job_id":      jobID,
+		"document_id": documentID,
+		"status":      "cancelled",
+		"message":     "job cancelled, resources are being cleaned up",
+	})
+}
+
+// handleBatchDeleteDocuments 批量删除文档（三层清理：Qdrant → S3 → DB）
+func (a *API) handleBatchDeleteDocuments(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r.Context())
+	if claims.Role != auth.RoleAdmin {
+		writeError(w, http.StatusForbidden, "only admin can delete documents")
+		return
+	}
+
+	var req struct {
+		DocumentIDs []string `json:"document_ids"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if len(req.DocumentIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "document_ids is required")
+		return
+	}
+	if len(req.DocumentIDs) > 100 {
+		writeError(w, http.StatusBadRequest, "too many document_ids, max 100")
+		return
+	}
+
+	// 验证所有 ID 格式
+	for _, id := range req.DocumentIDs {
+		if _, err := uuid.Parse(strings.TrimSpace(id)); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid documentID: %s", id))
+			return
+		}
+	}
+
+	a.logger.Printf("[batch-delete] request: count=%d user_id=%s", len(req.DocumentIDs), claims.UserID)
+
+	var deletedCount int
+	var failedIDs []string
+
+	for _, docID := range req.DocumentIDs {
+		docID = strings.TrimSpace(docID)
+
+		item, err := a.store.GetDocumentByID(r.Context(), docID)
+		if err != nil {
+			a.logger.Printf("[batch-delete] skip: documentID=%s err=%v", docID, err)
+			failedIDs = append(failedIDs, docID)
+			continue
+		}
+
+		// 清理 Qdrant 向量
+		if err := a.purgeDocumentVectors(r.Context(), docID); err != nil {
+			a.logger.Printf("[batch-delete] qdrant purge failed: documentID=%s err=%v", docID, err)
+			failedIDs = append(failedIDs, docID)
+			continue
+		}
+
+		// 清理 S3 文件
+		if strings.TrimSpace(item.StorageKey) != "" {
+			if err := a.s3.RemoveObject(r.Context(), item.StorageKey); err != nil {
+				a.logger.Printf("[batch-delete] s3 remove failed: documentID=%s err=%v", docID, err)
+				failedIDs = append(failedIDs, docID)
+				continue
+			}
+		}
+
+		// 删除 DB 记录（级联删除 doc_chunks、ingest_jobs、ingest_events）
+		deleted, err := a.store.DeleteDocument(r.Context(), docID)
+		if err != nil || !deleted {
+			a.logger.Printf("[batch-delete] db delete failed: documentID=%s err=%v", docID, err)
+			failedIDs = append(failedIDs, docID)
+			continue
+		}
+
+		deletedCount++
+	}
+
+	a.logger.Printf("[batch-delete] completed: deleted=%d failed=%d user_id=%s", deletedCount, len(failedIDs), claims.UserID)
+
+	result := map[string]any{
+		"deleted_count": deletedCount,
+		"total":         len(req.DocumentIDs),
+	}
+	if len(failedIDs) > 0 {
+		result["failed_ids"] = failedIDs
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *API) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -1163,6 +1600,11 @@ func contentTypeByFileType(fileType string) string {
 	}
 }
 
+func hashTextContent(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
 func decodeJSONBody(r *http.Request, out any) error {
 	if r.Body == nil {
 		return errors.New("request body is required")
@@ -1270,10 +1712,14 @@ func writeError(w http.ResponseWriter, status int, message string) {
 func writeStructuredError(w http.ResponseWriter, apiErr *APIError) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(apiErr.StatusCode)
+
+	traceID := w.Header().Get("X-Request-Id")
+
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error":  apiErr.Message,
-		"code":   apiErr.Code,
-		"detail": apiErr.Detail,
+		"error":    apiErr.Message,
+		"code":     apiErr.Code,
+		"detail":   apiErr.Detail,
+		"trace_id": traceID,
 	})
 }
 

@@ -3,15 +3,23 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Sequence
 
-from worker.chunking import DocType
+from worker.chunking import DocType, ParsedSegment, normalize_text
+
+
+WORD_RE = re.compile(r"\b[a-zA-Z\u4e00-\u9fff]{2,}\b")
+SECTION_PATTERNS = (
+    re.compile(r"^(#{1,6})\s+(.+)$"),
+    re.compile(r"^(\d+(?:\.\d+)*)\s+(.+)$"),
+    re.compile(r"^(第[0-9零一二三四五六七八九十百千万两〇ＯoOIVXLCDMivxlcdm]+[章节卷篇回幕集])\s*(.+)$"),
+    re.compile(r"^(chapter\s+\d+)\s*[:：]?\s*(.+)$", re.IGNORECASE),
+    re.compile(r"^(section\s+\d+(?:\.\d+)*)\s*[:：]?\s*(.+)$", re.IGNORECASE),
+)
 
 
 @dataclass(frozen=True)
 class EnhancedMetadata:
-    """增强后的元数据"""
-
     keywords: List[str]
     doc_type: DocType
     language: str
@@ -22,8 +30,6 @@ class EnhancedMetadata:
 
 
 class MetadataEnhancer:
-    """元数据增强器"""
-
     CODE_PATTERNS = [
         r"\bdef\s+\w+",
         r"\bclass\s+\w+",
@@ -62,61 +68,31 @@ class MetadataEnhancer:
         r"\bplease\b",
         r"\bhow\b",
         r"\bwhat\b",
-        r"你好吗",
-        r"帮助您",
-        r"有问题",
-    ]
-
-    SECTION_PATTERNS = [
-        r"^(#{1,6})\s+(.+)$",
-        r"^(\d+(?:\.\d+)*)\s+(.+)$",
-        r"^(第.+[章节条项款])\s*(.+)$",
-        r"^(Chapter\s+\d+)\s*[:：]?\s*(.+)$",
-        r"^(Section\s+\d+(?:\.\d+)*)\s*[:：]?\s*(.+)$",
     ]
 
     def __init__(self, max_keywords: int = 5):
-        """
-        初始化元数据增强器
-
-        Args:
-            max_keywords: 提取的关键词最大数量
-        """
         self._max_keywords = max_keywords
         self._compiled_code_patterns = [
-            re.compile(p, re.IGNORECASE) for p in self.CODE_PATTERNS
+            re.compile(pattern, re.IGNORECASE) for pattern in self.CODE_PATTERNS
         ]
         self._compiled_conv_patterns = [
-            re.compile(p, re.IGNORECASE) for p in self.CONVERSATIONAL_PATTERNS
-        ]
-        self._compiled_section_patterns = [
-            re.compile(p, re.MULTILINE) for p in self.SECTION_PATTERNS
+            re.compile(pattern, re.IGNORECASE) for pattern in self.CONVERSATIONAL_PATTERNS
         ]
 
     def enhance(self, text: str) -> EnhancedMetadata:
-        """
-        增强文档元数据
-
-        Args:
-            text: 文档文本
-
-        Returns:
-            增强后的元数据
-        """
-        keywords = self._extract_keywords(text)
-        doc_type = self._classify_document(text)
-        language = self._detect_language(text)
-        word_count = len(text.split())
-        sentences = self._split_sentences(text)
+        normalized = text or ""
+        keywords = self._extract_keywords(normalized)
+        doc_type = self._classify_document(normalized)
+        language = self._detect_language(normalized)
+        word_count = len(normalized.split())
+        sentences = self._split_sentences(normalized)
         sentence_count = len(sentences)
         avg_sentence_length = (
-            sum(len(s.split()) for s in sentences) / sentence_count
+            sum(len(sentence.split()) for sentence in sentences) / sentence_count
             if sentence_count > 0
             else 0.0
         )
-
-        section_hierarchy = self._extract_section_hierarchy(text)
-
+        section_hierarchy = self._extract_section_hierarchy(normalized)
         return EnhancedMetadata(
             keywords=keywords,
             doc_type=doc_type,
@@ -127,166 +103,16 @@ class MetadataEnhancer:
             section_hierarchy=section_hierarchy,
         )
 
-    def _extract_keywords(self, text: str) -> List[str]:
-        """提取关键词"""
-        words = re.findall(r"\b[a-zA-Z\u4e00-\u9fff]{2,}\b", text.lower())
+    def enhance_segments(
+        self,
+        segments: Sequence[ParsedSegment],
+        *,
+        max_chars: int = 120000,
+    ) -> EnhancedMetadata:
+        sampled = self._sample_segments(segments, max_chars=max_chars)
+        return self.enhance(sampled)
 
-        if not words:
-            return []
-
-        word_freq = Counter(words)
-
-        stop_words = {
-            "the",
-            "a",
-            "an",
-            "is",
-            "are",
-            "was",
-            "were",
-            "be",
-            "been",
-            "being",
-            "have",
-            "has",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "would",
-            "could",
-            "should",
-            "may",
-            "might",
-            "must",
-            "shall",
-            "can",
-            "need",
-            "dare",
-            "ought",
-            "used",
-            "的",
-            "了",
-            "在",
-            "是",
-            "我",
-            "有",
-            "和",
-            "就",
-            "不",
-            "人",
-            "都",
-            "一",
-            "一个",
-        }
-
-        filtered_words = [
-            (word, freq) for word, freq in word_freq.items() if word not in stop_words
-        ]
-
-        filtered_words.sort(key=lambda x: x[1], reverse=True)
-
-        return [word for word, _ in filtered_words[: self._max_keywords]]
-
-    def _classify_document(self, text: str) -> DocType:
-        """分类文档类型"""
-        code_score = sum(
-            1 for pattern in self._compiled_code_patterns if pattern.search(text)
-        )
-
-        conv_score = sum(
-            1 for pattern in self._compiled_conv_patterns if pattern.search(text)
-        )
-
-        tech_score = sum(
-            1 for term in self.TECHNICAL_TERMS if term.lower() in text.lower()
-        )
-
-        scores = {
-            DocType.CODE: code_score * 3,
-            DocType.CONVERSATIONAL: conv_score * 3,
-            DocType.TECHNICAL: tech_score,
-            DocType.GENERAL: 0,
-        }
-
-        max_score = max(scores.values())
-        if max_score == 0:
-            return DocType.GENERAL
-
-        doc_type = max(scores, key=lambda x: scores[x])
-
-        if scores[doc_type] < 3:
-            return DocType.GENERAL
-
-        return doc_type
-
-    def _detect_language(self, text: str) -> str:
-        """检测语言"""
-        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
-        total_chars = len(text)
-
-        if total_chars == 0:
-            return "unknown"
-
-        chinese_ratio = chinese_chars / total_chars
-
-        if chinese_ratio > 0.3:
-            return "zh"
-        elif chinese_ratio > 0.1:
-            return "zh-en"
-        else:
-            return "en"
-
-    def _split_sentences(self, text: str) -> List[str]:
-        """分割句子"""
-        sentences = re.split(r"[。！？.!?]", text)
-        return [s.strip() for s in sentences if s.strip()]
-
-    def _extract_section_hierarchy(self, text: str) -> List[Dict[str, str]]:
-        """提取章节标题层级"""
-        sections: List[Dict[str, str]] = []
-
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-
-            for pattern in self._compiled_section_patterns:
-                match = pattern.match(line)
-                if match:
-                    groups = match.groups()
-                    if len(groups) == 2:
-                        marker, title = groups
-                        level = self._calculate_section_level(marker)
-                        sections.append(
-                            {"level": str(level), "title": title.strip(), "marker": marker}
-                        )
-                    break
-
-        return sections
-
-    def _calculate_section_level(self, marker: str) -> int:
-        """计算章节层级"""
-        if marker.startswith("#"):
-            return len(marker)
-
-        if re.match(r"\d+(?:\.\d+)*", marker):
-            return len(marker.split("."))
-
-        if re.search(r"第.+ [章节条项款]", marker):
-            return 1
-
-        if re.match(r"Chapter\s+\d+", marker, re.IGNORECASE):
-            return 1
-
-        if re.match(r"Section\s+\d+", marker, re.IGNORECASE):
-            return 2
-
-        return 1
-
-    def to_dict(self, metadata: EnhancedMetadata) -> Dict:
-        """将元数据转换为字典"""
+    def to_dict(self, metadata: EnhancedMetadata) -> Dict[str, object]:
         return {
             "keywords": metadata.keywords,
             "doc_type": metadata.doc_type.value,
@@ -296,3 +122,128 @@ class MetadataEnhancer:
             "avg_sentence_length": round(metadata.avg_sentence_length, 2),
             "section_hierarchy": metadata.section_hierarchy,
         }
+
+    def _sample_segments(self, segments: Sequence[ParsedSegment], *, max_chars: int) -> str:
+        if max_chars <= 0:
+            max_chars = 120000
+        if not segments:
+            return ""
+
+        budget = 0
+        samples: list[str] = []
+        step = max(len(segments) // 8, 1)
+
+        for idx, segment in enumerate(segments):
+            include = idx < 4 or idx == len(segments) - 1 or idx % step == 0
+            if not include:
+                continue
+
+            title = segment.section_title.strip()
+            body = segment.text.strip()
+            if not body:
+                continue
+
+            snippet = body[: min(len(body), max(2000, max_chars // 8))]
+            candidate = f"{title}\n{snippet}" if title else snippet
+            budget += len(candidate)
+            samples.append(candidate)
+            if budget >= max_chars:
+                break
+
+        if not samples:
+            samples.append(segments[0].text[:max_chars])
+
+        return "\n\n".join(samples)[:max_chars]
+
+    def _extract_keywords(self, text: str) -> List[str]:
+        words = WORD_RE.findall(text.lower())
+        if not words:
+            return []
+
+        stop_words = {
+            "the",
+            "and",
+            "that",
+            "this",
+            "with",
+            "from",
+            "have",
+            "were",
+            "will",
+            "would",
+            "should",
+            "about",
+            "there",
+            "their",
+            "因为",
+            "所以",
+            "一个",
+            "我们",
+            "他们",
+            "已经",
+            "没有",
+        }
+        counter = Counter(word for word in words if word not in stop_words)
+        return [word for word, _ in counter.most_common(self._max_keywords)]
+
+    def _classify_document(self, text: str) -> DocType:
+        code_score = sum(1 for pattern in self._compiled_code_patterns if pattern.search(text))
+        conversational_score = sum(1 for pattern in self._compiled_conv_patterns if pattern.search(text))
+        technical_score = sum(1 for term in self.TECHNICAL_TERMS if term in text.lower())
+        scores = {
+            DocType.CODE: code_score * 3,
+            DocType.CONVERSATIONAL: conversational_score * 3,
+            DocType.TECHNICAL: technical_score,
+            DocType.GENERAL: 0,
+        }
+        best_type = max(scores, key=scores.get)
+        return best_type if scores[best_type] >= 3 else DocType.GENERAL
+
+    def _detect_language(self, text: str) -> str:
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+        total_chars = len(text)
+        if total_chars == 0:
+            return "unknown"
+
+        ratio = chinese_chars / total_chars
+        if ratio > 0.3:
+            return "zh"
+        if ratio > 0.1:
+            return "zh-en"
+        return "en"
+
+    def _split_sentences(self, text: str) -> List[str]:
+        return [item.strip() for item in re.split(r"[。！？!?]", text) if item.strip()]
+
+    def _extract_section_hierarchy(self, text: str) -> List[Dict[str, str]]:
+        sections: List[Dict[str, str]] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            for pattern in SECTION_PATTERNS:
+                match = pattern.match(stripped)
+                if not match:
+                    continue
+                marker = match.group(1).strip()
+                title = match.group(2).strip()
+                sections.append(
+                    {
+                        "level": str(self._calculate_section_level(marker)),
+                        "title": title,
+                        "marker": marker,
+                    }
+                )
+                break
+        return sections
+
+    def _calculate_section_level(self, marker: str) -> int:
+        if marker.startswith("#"):
+            return len(marker)
+        if re.match(r"\d+(?:\.\d+)*", marker):
+            return len(marker.split("."))
+        if marker.lower().startswith("chapter"):
+            return 1
+        if marker.lower().startswith("section"):
+            return 2
+        return 1

@@ -1,0 +1,68 @@
+[
+    {
+        "id": "eval-001",
+        "question": "公司对于跨部分请假有哪些审批要求？",
+        "expected_answer": "根据 HR 规章体系，跨部门请假超过 3 天需要直属主管及对应跨部门协调主管双重审批，审批通过后方可休假。",
+        "allowed_corpus_ids": [
+            "corpus-hr"
+        ],
+        "allowed_document_ids": [
+            "doc-hr-leave-policy-v2"
+        ],
+        "allow_common_knowledge": false,
+        "category": "factual"
+    },
+    {
+        "id": "eval-002",
+        "question": "如果用户上传的文档超过 50MB，系统应该如何处理？详细说明整个退回流程。",
+        "expected_answer": "系统首先在 Gateway 层次校验 Content-Length，若超过 50MB 阈值，网关直接返回 413 Payload Too Large 错误，不触发 Worker 的 Ingest Job，前端提示用户文件超大并指导分割上传。",
+        "allowed_corpus_ids": [
+            "corpus-tech"
+        ],
+        "allowed_document_ids": [
+            "doc-tech-architecture-v1",
+            "doc-tech-gateway-spec"
+        ],
+        "allow_common_knowledge": false,
+        "category": "process"
+    },
+    {
+        "id": "eval-003",
+        "question": "在之前的项目中，遇到了线上数据库连接池耗尽的问题，请问当时的临时排障和根本原因是什么？",
+        "expected_answer": "临时排障手段是紧急重启相关查询服务容器并扩容连接池配置至 500；根本原因在于某导出任务忘记释放连接，导致泄漏。后续通过增加 defer close() 与连接超时自动回收机制解决。",
+        "allowed_corpus_ids": [
+            "corpus-tech"
+        ],
+        "allowed_document_ids": [
+            "doc-postmortem-db-exhaust-2025"
+        ],
+        "allow_common_knowledge": false,
+        "category": "troubleshooting"
+    },
+    {
+        "id": "eval-004",
+        "question": "对比 V1 和 V2 版本的发布流程，最大的差异在哪里？",
+        "expected_answer": "最大的差异在于 V2 引入了灰度发布和蓝绿部署，而 V1 版本仅支持完全替换发布。V2 要求发布前必须通过自动化回归集成套件，而 V1 大多依赖手工验证。",
+        "allowed_corpus_ids": [
+            "corpus-tech",
+            "corpus-product"
+        ],
+        "allowed_document_ids": [],
+        "allow_common_knowledge": false,
+        "category": "cross-doc-summary"
+    },
+    {
+        "id": "eval-005",
+        "question": "如何评估该 RAG 的召回性能？",
+        "expected_answer": "本系统通过包含 50+ 个基准问题的数据集评测 Recall@5, MRR 等指标，并在真实语料下验证 TTFT 与 P95 完整回答延迟，以此来证明检索优化及工程架构的可信度。",
+        "allowed_corpus_ids": [
+            "corpus-tech"
+        ],
+        "allowed_document_ids": [
+            "doc-readme",
+            "doc-architecture"
+        ],
+        "allow_common_knowledge": true,
+        "category": "factual"
+    }
+]

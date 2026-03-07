@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Get-RepoRoot
 Set-Location $repoRoot
 
-Write-Host "[INFO] Repo root: $repoRoot"
+Write-Info "Repo root: $repoRoot"
 
 $managedFrontendPid = Get-ManagedFrontendPid
 $dockerReady = Test-DockerReady
@@ -54,24 +54,24 @@ if ($null -ne $managedFrontendPid) {
     Stop-ManagedFrontend | Out-Null
 }
 else {
-    Write-Host "[INFO] No managed frontend process found."
+    Write-Info "No managed frontend process found."
 }
 
 if ($dockerReady) {
-    Write-Host "[INFO] Stopping Docker services..."
+    Write-Info "Stopping Docker services..."
     Invoke-DockerCompose -Arguments $composeArgs
 }
 else {
-    Write-Host "[WARN] Docker daemon is not available. Skipped docker compose down."
+    Write-Warn "Docker daemon is not available. Skipped docker compose down."
 }
 
 Write-Host ""
 Write-Host "[DONE] Project stopped."
 if ($RemoveVolumes) {
-    Write-Host "[WARN] Named volumes were removed."
+    Write-Warn "Named volumes were removed."
 }
 if ($RemoveImages) {
-    Write-Host "[WARN] Images were removed."
+    Write-Warn "Images were removed."
 }
 Write-Host ""
 Write-Host "Start again with: .\scripts\dev-up.ps1"

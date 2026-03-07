@@ -66,6 +66,12 @@
               <span v-if="msg.isTyping" class="typing-cursor">|</span>
             </div>
             <RagMessageRenderer v-else :answer="msg.data" />
+            
+            <div v-if="!msg.isStreaming && msg.data" class="msg-actions">
+              <el-button link type="primary" size="small" @click="$emit('inspect', msg.data)">
+                查看详情 / Debug
+              </el-button>
+            </div>
           </div>
         </template>
       </div>
@@ -89,6 +95,7 @@ interface ThinkingStep {
 const props = defineProps<{ messages: any[] }>();
 const emit = defineEmits<{
   (e: 'retry', message: any): void;
+  (e: 'inspect', answerData: any): void;
 }>();
 
 const thinkingSteps = ref<ThinkingStep[]>([
@@ -296,5 +303,12 @@ onUnmounted(() => {
 
 .assistant-response {
   min-height: 24px;
+}
+.msg-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px dashed var(--border-color-light);
+  padding-top: 8px;
 }
 </style>

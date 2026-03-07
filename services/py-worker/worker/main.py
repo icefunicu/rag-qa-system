@@ -12,6 +12,7 @@ from redis.exceptions import RedisError
 from worker.config import build_worker_config
 from worker.logger import setup_worker_logger
 from worker.processor import IngestProcessor
+from worker.runtime_progress import RedisRuntimeProgressTracker
 
 
 logger = setup_worker_logger(
@@ -47,7 +48,7 @@ def run() -> None:
     
     cfg = build_worker_config()
     redis_cli = Redis.from_url(cfg.redis_url, decode_responses=True)
-    processor = IngestProcessor(cfg)
+    processor = IngestProcessor(cfg, progress_tracker=RedisRuntimeProgressTracker(cfg.redis_url))
 
     logger.info(
         "Worker started",

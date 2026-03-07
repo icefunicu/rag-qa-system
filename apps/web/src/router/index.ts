@@ -46,6 +46,11 @@ const routes = [
                 path: 'corpus/:id',
                 name: 'CorpusDetail',
                 component: () => import('@/views/dashboard/CorpusDetail.vue')
+            },
+            {
+                path: 'evaluation',
+                name: 'EvaluationCockpit',
+                component: () => import('@/views/dashboard/EvaluationCockpit.vue')
             }
         ]
     }
@@ -56,20 +61,16 @@ const router = createRouter({
     routes
 });
 
-router.beforeEach((to, _from, next) => {
+router.beforeEach((to) => {
     const authStore = useAuthStore();
 
     if (to.meta.requiresAuth && !authStore.token) {
-        next({ path: '/login', query: { redirect: to.fullPath } });
-        return;
+        return { path: '/login', query: { redirect: to.fullPath } };
     }
 
     if (to.meta.requiresAdmin && !authStore.isAdmin()) {
-        next({ path: '/chat' });
-        return;
+        return { path: '/chat' };
     }
-
-    next();
 });
 
 export default router;

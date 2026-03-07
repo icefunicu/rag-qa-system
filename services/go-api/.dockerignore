@@ -1,0 +1,7 @@
+.git
+.gitignore
+.vscode
+.idea
+coverage.out
+*.md
+*_test.go

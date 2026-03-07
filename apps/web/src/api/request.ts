@@ -3,6 +3,10 @@ import { useAuthStore } from '@/store/auth';
 import { ElMessage } from 'element-plus';
 import router from '@/router';
 
+export interface RequestConfig {
+    skipErrorHandler?: boolean;
+}
+
 const request = axios.create({
     baseURL: '/v1',
     timeout: 60000
@@ -19,6 +23,10 @@ request.interceptors.request.use(config => {
 request.interceptors.response.use(
     response => response.data,
     error => {
+        if ((error.config as RequestConfig | undefined)?.skipErrorHandler) {
+            return Promise.reject(error);
+        }
+
         const backendError =
             error.response?.data?.error ||
             error.response?.data?.message ||

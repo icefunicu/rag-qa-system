@@ -8,9 +8,15 @@
         <el-empty description="请选择或新建一个会话开始对话" />
       </div>
       <div v-else class="chat-box">
-        <ChatMessageList :messages="messages" @retry="handleRetry" />
+        <ChatMessageList :messages="messages" @retry="handleRetry" @inspect="handleInspect" />
         <ChatInputArea @send="handleSend" :disabled="loading" />
       </div>
+
+      <!-- Answer Inspector Drawer -->
+      <AnswerInspector 
+        v-model:visible="inspectorVisible"
+        :answer-data="currentInspectData"
+      />
     </el-main>
   </el-container>
 </template>
@@ -20,12 +26,16 @@ import { ref } from 'vue';
 import ChatSidebar from '@/components/ChatSidebar.vue';
 import ChatMessageList from '@/components/ChatMessageList.vue';
 import ChatInputArea from '@/components/ChatInputArea.vue';
-import { sendMessage, sendMessageStream, type ChatScope, type SSEEvent } from '@/api/chat';
+import AnswerInspector from '@/components/AnswerInspector.vue';
+import { sendMessage, sendMessageStream, getSessionMessages, type ChatScope, type SSEEvent } from '@/api/chat';
 
 const currentSessionId = ref<string>('');
 const messages = ref<any[]>([]);
 const loading = ref(false);
 const useStreaming = ref(true); // 是否启用流式响应
+
+const inspectorVisible = ref(false);
+const currentInspectData = ref<any>(null);
 
 // 错误类型常量
 const ErrorType = {
@@ -187,9 +197,38 @@ const buildChatErrorMessage = (error: any): { title: string; message: string; re
   };
 };
 
-const handleSessionSelect = (id: string) => {
+const handleSessionSelect = async (id: string) => {
   currentSessionId.value = id;
-  messages.value = []; // TBD: History support
+  messages.value = [];
+  loading.value = true;
+  try {
+    const res = await getSessionMessages(id);
+    const data = (res as any).items || (res as any).data?.items || [];
+    if (data.length > 0) {
+      messages.value = data.map((m: any) => {
+        if (m.role === 'user') {
+          return { role: 'user', content: m.content };
+        } else {
+          try {
+            const data = typeof m.content === 'string' ? JSON.parse(m.content) : m.content;
+            return { role: 'assistant', data };
+          } catch {
+            return { role: 'assistant', data: { content: m.content } };
+          }
+        }
+      });
+    }
+  } catch (err) {
+    console.error('Failed to load history', err);
+  } finally {
+    loading.value = false;
+  }
+};
+
+const handleInspect = (messageData: any) => {
+  if (!messageData) return;
+  currentInspectData.value = messageData;
+  inspectorVisible.value = true;
 };
 
 const handleSend = async (question: string, scope: ChatScope) => {

@@ -553,7 +553,7 @@ def main():
     parser.add_argument(
         "--output",
         "-o",
-        default=".",
+        default="docs/reports/benchmark",
         help="输出目录",
     )
     parser.add_argument(

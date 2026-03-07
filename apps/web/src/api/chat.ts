@@ -14,6 +14,10 @@ export function getSessions() {
     return request.get<{ items: ChatSession[]; count: number }>('/chat/sessions');
 }
 
+export function getSessionMessages(sessionId: string) {
+    return request.get<{ items: any[]; count: number }>(`/chat/sessions/${sessionId}/messages`);
+}
+
 export interface ChatScope {
     mode: 'single' | 'multi';
     corpus_ids: string[];
@@ -142,7 +146,7 @@ export async function* sendMessageStream(
 
         } catch (error) {
             retryCount++;
-            
+
             // 达到最大重试次数，抛出错误
             if (retryCount > maxRetries) {
                 console.error(`SSE connection failed after ${maxRetries} retries:`, error);
@@ -161,7 +165,7 @@ export async function* sendMessageStream(
                 type: 'error',
                 message: `网络连接不稳定，${retryDelay / 1000}秒后自动重连...`,
             };
-            
+
             await new Promise(resolve => setTimeout(resolve, retryDelay));
             currentDelay *= 2; // 指数增长
         }

@@ -20,7 +20,7 @@ import (
 
 func main() {
 	cfg := config.Load()
-	logger := log.New(os.Stdout, "[go-api] ", log.LstdFlags|log.LUTC)
+	logger := log.New(os.Stdout, "[go-api] ", log.LstdFlags|log.Lmicroseconds|log.LUTC)
 
 	store, err := db.NewStore(
 		cfg.PostgresDSN,
@@ -32,6 +32,15 @@ func main() {
 		logger.Fatalf("connect postgres failed: %v", err)
 	}
 	defer store.Close()
+
+	ctxUsers, cancelUsers := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelUsers()
+	if err := store.EnsureConfiguredUsers(ctxUsers, []db.ConfiguredUser{
+		{ID: cfg.AdminUserID, Email: cfg.AdminEmail, Role: "admin"},
+		{ID: cfg.MemberUserID, Email: cfg.MemberEmail, Role: "member"},
+	}); err != nil {
+		logger.Fatalf("sync configured users failed: %v", err)
+	}
 
 	rdb := redis.NewClient(&redis.Options{
 		Addr: cfg.RedisURL, // Simplification for URL, actual may need ParseURL

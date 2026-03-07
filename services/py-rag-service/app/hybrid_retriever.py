@@ -24,6 +24,9 @@ class RetrievalResult:
     text: str
     score: float
     retrieval_type: str  # "dense", "sparse", or "hybrid"
+    section_id: str = ""
+    section_title: str = ""
+    point_type: str = "chunk"
 
 
 class HybridRetriever:
@@ -109,6 +112,9 @@ class HybridRetriever:
                         text=doc.get("text", ""),
                         score=float(score),
                         retrieval_type="sparse",
+                        section_id=doc.get("section_id", ""),
+                        section_title=doc.get("section_title", ""),
+                        point_type=doc.get("point_type", "chunk"),
                     )
                 )
 
@@ -158,6 +164,9 @@ class HybridRetriever:
                     text=str(payload.get("text", "")),
                     score=float(point.score or 0.0),
                     retrieval_type="dense",
+                    section_id=str(payload.get("section_id", "")),
+                    section_title=str(payload.get("section_title", "")),
+                    point_type=str(payload.get("point_type", "chunk")),
                 )
             )
 
@@ -212,6 +221,9 @@ class HybridRetriever:
                     text=result.text,
                     score=final_score,
                     retrieval_type="hybrid",
+                    section_id=result.section_id,
+                    section_title=result.section_title,
+                    point_type=result.point_type,
                 )
             )
 

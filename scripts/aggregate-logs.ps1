@@ -26,21 +26,26 @@ function Split-ServiceSelection {
     $includeFrontend = $false
 
     foreach ($item in $RequestedServices) {
-        $name = $item.Trim()
-        if (-not $name) {
-            continue
-        }
+        $segments = @($item -split ",")
+        foreach ($segment in $segments) {
+            $name = $segment.Trim()
+            if (-not $name) {
+                continue
+            }
 
-        if ($name -eq "frontend") {
-            $includeFrontend = $true
-            continue
-        }
+            if ($name -eq "frontend") {
+                $includeFrontend = $true
+                continue
+            }
 
-        $dockerServices.Add($name)
+            $dockerServices.Add($name)
+        }
     }
 
+    Assert-ComposeServicesExist -ServiceNames @($dockerServices)
+
     return [PSCustomObject]@{
-        DockerServices  = @($dockerServices)
+        DockerServices  = @($dockerServices | Select-Object -Unique)
         IncludeFrontend = $includeFrontend
     }
 }
@@ -51,13 +56,54 @@ function Get-ComposeLogsText {
         [Parameter(Mandatory = $true)][int]$LineCount
     )
 
-    $output = & docker compose logs --no-color --tail $LineCount $ServiceName 2>&1
+    $output = & docker compose logs --no-color --timestamps --tail $LineCount $ServiceName 2>&1
     $exitCode = $LASTEXITCODE
     $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
 
     return [PSCustomObject]@{
         ExitCode = $exitCode
         Text     = $text.TrimEnd()
+    }
+}
+
+function Normalize-LogLine {
+    param(
+        [AllowEmptyString()][string]$Line
+    )
+
+    $cleaned = [regex]::Replace($Line, "$([char]27)\[[0-?]*[ -/]*[@-~]", "").TrimEnd()
+    $cleaned = $cleaned.Replace("閴?", ">")
+    if ($cleaned -match '^[^A-Za-z/\[]*(Local:|Network:|press\s)') {
+        $cleaned = [regex]::Replace($cleaned, '^[^A-Za-z/\[]*(Local:|Network:|press\s)', '> $1')
+    }
+
+    return $cleaned
+}
+
+function Add-NormalizedLogLines {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [string[]]$Lines,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$CombinedLines,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$ErrorLines,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$WarningLines
+    )
+
+    foreach ($line in $Lines) {
+        $normalizedLine = Normalize-LogLine -Line $line
+        if (-not $normalizedLine) {
+            continue
+        }
+
+        $withSource = "$Source | $normalizedLine"
+        $CombinedLines.Add($withSource)
+
+        if ($normalizedLine -match "\b(ERROR|FATAL|CRITICAL)\b") {
+            $ErrorLines.Add($withSource)
+        }
+        elseif ($normalizedLine -match "\bWARN(ING)?\b") {
+            $WarningLines.Add($withSource)
+        }
     }
 }
 
@@ -88,70 +134,46 @@ $errorDir = Join-Path $outputRoot "ERROR"
 $warningDir = Join-Path $outputRoot "WARNING"
 
 foreach ($dir in @($outputRoot, $allDir, $errorDir, $warningDir)) {
-    if (-not (Test-Path $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    }
+    Ensure-Directory -Path $dir
 }
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $allLogs = @{}
+$combinedLines = New-Object System.Collections.Generic.List[string]
 $errorLines = New-Object System.Collections.Generic.List[string]
 $warningLines = New-Object System.Collections.Generic.List[string]
 $collectionErrors = New-Object System.Collections.Generic.List[string]
 
-Write-Host "[INFO] Output directory: $outputRoot"
+Write-Info "Output directory: $outputRoot"
 
 if ($dockerReady) {
     $dockerServices = @($selection.DockerServices)
     if ($dockerServices.Count -gt 0) {
-        Write-Host "[INFO] Collecting compose logs for: $($dockerServices -join ', ')"
+        Write-Info "Collecting compose logs for: $($dockerServices -join ', ')"
     }
 
     foreach ($serviceName in $dockerServices) {
         $result = Get-ComposeLogsText -ServiceName $serviceName -LineCount $Tail
         if ($result.ExitCode -ne 0) {
             $collectionErrors.Add("$serviceName | $($result.Text)")
-            Write-Host "[WARN] Failed to collect $serviceName"
+            Write-Warn "Failed to collect $serviceName"
             continue
         }
 
         $allLogs[$serviceName] = $result.Text
-        foreach ($line in ($result.Text -split "`r?`n")) {
-            if (-not $line.Trim()) {
-                continue
-            }
-
-            if ($line -match "\b(ERROR|FATAL|CRITICAL)\b") {
-                $errorLines.Add("$serviceName | $line")
-            }
-            elseif ($line -match "\bWARN(ING)?\b") {
-                $warningLines.Add("$serviceName | $line")
-            }
-        }
+        Add-NormalizedLogLines -Source $serviceName -Lines ($result.Text -split "`r?`n") -CombinedLines $combinedLines -ErrorLines $errorLines -WarningLines $warningLines
     }
 }
 else {
-    Write-Host "[WARN] Docker is unavailable. Only frontend log snapshot will be exported."
+    Write-Warn "Docker is unavailable. Only frontend log snapshot will be exported."
 }
 
 if ($selection.IncludeFrontend) {
     if (Test-Path $frontendLogFile) {
-        $frontendLines = Get-Content -Path $frontendLogFile -Tail $Tail -ErrorAction SilentlyContinue
+        $frontendLines = @(Get-Content -Path $frontendLogFile -Tail $Tail -ErrorAction SilentlyContinue)
         $frontendText = ($frontendLines | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
         $allLogs["frontend"] = $frontendText
-
-        foreach ($line in $frontendLines) {
-            if (-not $line.Trim()) {
-                continue
-            }
-
-            if ($line -match "\b(ERROR|FATAL|CRITICAL)\b") {
-                $errorLines.Add("frontend | $line")
-            }
-            elseif ($line -match "\bWARN(ING)?\b") {
-                $warningLines.Add("frontend | $line")
-            }
-        }
+        Add-NormalizedLogLines -Source "frontend" -Lines $frontendLines -CombinedLines $combinedLines -ErrorLines $errorLines -WarningLines $warningLines
     }
     else {
         $collectionErrors.Add("frontend | managed frontend log file not found")
@@ -164,20 +186,24 @@ if ($allLogs.Count -eq 0) {
 
 foreach ($serviceName in ($allLogs.Keys | Sort-Object)) {
     $targetFile = Join-Path $allDir "$serviceName.log"
-    $allLogs[$serviceName] | Out-File -FilePath $targetFile -Encoding utf8
-    Write-Host "[OK] $targetFile"
+    Write-Utf8File -Path $targetFile -Lines @($allLogs[$serviceName] -split "`r?`n")
+    Write-Ok $targetFile
 }
+
+$combinedFile = Join-Path $outputRoot "combined_$timestamp.log"
+Write-Utf8File -Path $combinedFile -Lines $combinedLines
+Write-Ok $combinedFile
 
 if ($errorLines.Count -gt 0) {
     $errorFile = Join-Path $errorDir "errors_$timestamp.log"
-    $errorLines | Out-File -FilePath $errorFile -Encoding utf8
-    Write-Host "[OK] $errorFile"
+    Write-Utf8File -Path $errorFile -Lines $errorLines
+    Write-Ok $errorFile
 }
 
 if ($warningLines.Count -gt 0) {
     $warningFile = Join-Path $warningDir "warnings_$timestamp.log"
-    $warningLines | Out-File -FilePath $warningFile -Encoding utf8
-    Write-Host "[OK] $warningFile"
+    Write-Utf8File -Path $warningFile -Lines $warningLines
+    Write-Ok $warningFile
 }
 
 $summary = @()
@@ -187,6 +213,9 @@ $summary += "Tail: $Tail"
 $summary += ""
 $summary += "Collected services:"
 $summary += ($allLogs.Keys | Sort-Object | ForEach-Object { "- $_" })
+$summary += ""
+$summary += "Combined log:"
+$summary += "- $combinedFile"
 $summary += ""
 $summary += "Error lines: $($errorLines.Count)"
 $summary += "Warning lines: $($warningLines.Count)"
@@ -199,5 +228,5 @@ if ($collectionErrors.Count -gt 0) {
 }
 
 $summaryFile = Join-Path $outputRoot "summary_$timestamp.txt"
-$summary | Out-File -FilePath $summaryFile -Encoding utf8
-Write-Host "[OK] $summaryFile"
+Write-Utf8File -Path $summaryFile -Lines $summary
+Write-Ok $summaryFile

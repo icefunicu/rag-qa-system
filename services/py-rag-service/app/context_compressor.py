@@ -125,7 +125,7 @@ class LLMBasedCompressor(ContextCompressorInterface):
     def _llm_compress(self, prompt: str, max_tokens: int) -> str:
         """调用 LLM 进行压缩"""
         payload = {
-            "model": self.llm_gateway._cfg.llm_chat_model,
+            "model": self.llm_gateway._cfg.chat_model,
             "temperature": 0.1,
             "max_tokens": max_tokens,
             "messages": [
