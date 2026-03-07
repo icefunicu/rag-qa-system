@@ -1,44 +1,49 @@
 <template>
   <div class="login-view">
-    <el-form 
-      :model="form" 
-      :rules="rules" 
-      ref="formRef" 
-      @keyup.enter="handleLogin" 
+    <el-alert
+      title="默认账号：admin@local / member@local，默认密码 ChangeMe123!"
+      type="info"
+      :closable="false"
+      class="login-hint"
+    />
+    <el-form
+      :model="form"
+      :rules="rules"
+      ref="formRef"
+      @keyup.enter="handleLogin"
       label-position="top"
-      class="login-form">
-      
-      <el-form-item label="Email Address" prop="email">
-        <el-input 
-          v-model="form.email" 
-          placeholder="Enter your email" 
-          :prefix-icon="Message" 
+      class="login-form"
+    >
+      <el-form-item label="邮箱" prop="email">
+        <el-input
+          v-model="form.email"
+          placeholder="请输入登录邮箱"
+          :prefix-icon="Message"
           size="large"
           class="custom-input"
         />
       </el-form-item>
-      
-      <el-form-item label="Password" prop="password">
-        <el-input 
-          v-model="form.password" 
-          type="password" 
-          placeholder="Enter your password" 
-          :prefix-icon="Lock" 
-          show-password 
+
+      <el-form-item label="密码" prop="password">
+        <el-input
+          v-model="form.password"
+          type="password"
+          placeholder="请输入密码"
+          :prefix-icon="Lock"
+          show-password
           size="large"
           class="custom-input"
         />
       </el-form-item>
-      
-      <!-- Optional: Remember me & Forgot Password Row -->
+
       <div class="form-actions">
-        <el-checkbox v-model="rememberMe">Remember me</el-checkbox>
-        <el-link type="primary" underline="never">Forgot password?</el-link>
+        <el-checkbox v-model="rememberMe">记住我</el-checkbox>
+        <el-link type="primary" underline="never">本地开发环境</el-link>
       </div>
 
       <el-form-item class="submit-item">
         <el-button type="primary" :loading="loading" @click="handleLogin" size="large" class="submit-btn">
-          Sign In
+          进入工作台
         </el-button>
       </el-form-item>
     </el-form>
@@ -46,12 +51,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue';
-import { useRouter, useRoute } from 'vue-router';
-import { useAuthStore } from '@/store/auth';
-import { login } from '@/api/auth';
+import { reactive, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { Lock, Message } from '@element-plus/icons-vue';
+import { login } from '@/api/auth';
+import { useAuthStore } from '@/store/auth';
 
 const router = useRouter();
 const route = useRoute();
@@ -66,28 +71,31 @@ const form = reactive({
 const rememberMe = ref(true);
 
 const rules = {
-  email: [{ required: true, message: 'Please input email', trigger: 'blur' }],
-  password: [{ required: true, message: 'Please input password', trigger: 'blur' }]
+  email: [{ required: true, message: '请输入邮箱', trigger: 'blur' }],
+  password: [{ required: true, message: '请输入密码', trigger: 'blur' }]
 };
 
 const loading = ref(false);
 
 const handleLogin = async () => {
-  if (!formRef.value) return;
+  if (!formRef.value) {
+    return;
+  }
   await formRef.value.validate(async (valid: boolean) => {
-    if (valid) {
-      loading.value = true;
-      try {
-        const res: any = await login({ email: form.email, password: form.password });
-        if (res.access_token) {
-          authStore.setAuth(res.access_token, res.user);
-          ElMessage.success('Login Successful');
-          const redirect = route.query.redirect as string || '/';
-          router.push(redirect);
-        }
-      } finally {
-        loading.value = false;
+    if (!valid) {
+      return;
+    }
+    loading.value = true;
+    try {
+      const res: any = await login({ email: form.email, password: form.password });
+      if (res.access_token) {
+        authStore.setAuth(res.access_token, res.user);
+        ElMessage.success('登录成功');
+        const redirect = route.query.redirect as string || '/workspace/entry';
+        router.push(redirect);
       }
+    } finally {
+      loading.value = false;
     }
   });
 };
@@ -96,6 +104,11 @@ const handleLogin = async () => {
 <style scoped>
 .login-view {
   width: 100%;
+}
+
+.login-hint {
+  margin-bottom: 20px;
+  border-radius: 12px;
 }
 
 :deep(.el-form-item__label) {

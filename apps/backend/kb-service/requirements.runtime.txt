@@ -1,0 +1,8 @@
+fastapi==0.115.8
+psycopg[binary]==3.2.5
+PyJWT==2.10.1
+pypdf==5.3.1
+python-docx==1.1.2
+python-multipart==0.0.20
+uvicorn==0.34.0
+

@@ -1,26 +1,23 @@
 <template>
   <div class="auth-layout">
-    <!-- Left Banner Section -->
     <div class="auth-banner">
       <div class="banner-content animate-slide-up">
         <div class="logo-circle">
           <el-icon :size="36" color="#ffffff"><Platform /></el-icon>
         </div>
-        <h1>RAG-QA System</h1>
-        <p>Next-generation enterprise knowledge retrieval and intelligent assistant platform.</p>
+        <h1>RAG-QA 2.0</h1>
+        <p>统一网关，双独立内核。小说线路与企业库线路从入口页分流，上传、索引、问答都各走各的。</p>
       </div>
-      <!-- Decorative Background Shapes -->
       <div class="bg-shape shape-1"></div>
       <div class="bg-shape shape-2"></div>
       <div class="glass-overlay"></div>
     </div>
 
-    <!-- Right Content Section -->
     <div class="auth-content">
       <div class="auth-wrapper animate-fade-in">
         <div class="auth-header">
-          <h2>Welcome Back</h2>
-          <p>Please enter your details to sign in.</p>
+          <h2>登录工作台</h2>
+          <p>进入双线路上传与问答界面。</p>
         </div>
         <router-view />
       </div>
@@ -29,7 +26,7 @@
 </template>
 
 <script setup lang="ts">
-import { Platform } from '@element-plus/icons-vue'
+import { Platform } from '@element-plus/icons-vue';
 </script>
 
 <style scoped>
@@ -41,15 +38,15 @@ import { Platform } from '@element-plus/icons-vue'
   overflow: hidden;
 }
 
-/* --- Left Banner --- */
 .auth-banner {
   flex: 1;
   position: relative;
-  background: linear-gradient(135deg, var(--el-color-primary) 0%, #1e3a8a 100%);
+  background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 55%, #0f766e 100%);
   display: none;
   overflow: hidden;
   color: #ffffff;
 }
+
 @media (min-width: 900px) {
   .auth-banner {
     display: flex;
@@ -62,7 +59,7 @@ import { Platform } from '@element-plus/icons-vue'
 .banner-content {
   position: relative;
   z-index: 10;
-  max-width: 480px;
+  max-width: 520px;
 }
 
 .logo-circle {
@@ -89,42 +86,43 @@ import { Platform } from '@element-plus/icons-vue'
 
 .banner-content p {
   font-size: 18px;
-  line-height: 1.6;
-  opacity: 0.9;
+  line-height: 1.7;
+  opacity: 0.92;
   margin: 0;
   font-weight: 300;
 }
 
-/* Abstract Background Elements */
 .bg-shape {
   position: absolute;
   border-radius: 50%;
   filter: blur(80px);
   z-index: 1;
 }
+
 .shape-1 {
   width: 400px;
   height: 400px;
-  background: rgba(96, 165, 250, 0.4); /* primary-light-3 */
+  background: rgba(96, 165, 250, 0.4);
   top: -100px;
   left: -100px;
 }
+
 .shape-2 {
   width: 500px;
   height: 500px;
-  background: rgba(147, 197, 253, 0.3); /* primary-light-5 */
+  background: rgba(20, 184, 166, 0.3);
   bottom: -150px;
   right: -100px;
 }
+
 .glass-overlay {
   position: absolute;
   inset: 0;
-  background: linear-gradient(transparent 50%, rgba(0,0,0,0.1));
+  background: linear-gradient(transparent 50%, rgba(0, 0, 0, 0.1));
   z-index: 2;
   pointer-events: none;
 }
 
-/* --- Right Content --- */
 .auth-content {
   flex: 1;
   display: flex;
@@ -139,7 +137,7 @@ import { Platform } from '@element-plus/icons-vue'
 
 .auth-wrapper {
   width: 100%;
-  max-width: 400px;
+  max-width: 420px;
 }
 
 .auth-header {

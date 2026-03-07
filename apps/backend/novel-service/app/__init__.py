@@ -1,0 +1,2 @@
+"""Novel service package."""
+

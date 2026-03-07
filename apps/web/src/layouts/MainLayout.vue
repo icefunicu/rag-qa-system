@@ -1,51 +1,71 @@
 <template>
   <el-container class="main-layout">
-    <el-aside width="260px" class="app-sidebar">
+    <el-aside width="280px" class="app-sidebar">
       <div class="sidebar-header">
         <div class="logo-circle-mini">
-          <el-icon :size="20" color="var(--el-color-primary)"><Platform /></el-icon>
+          <el-icon :size="20"><Platform /></el-icon>
         </div>
-        <h2>RAG-P QA</h2>
+        <div>
+          <h2>RAG-QA 2.0</h2>
+          <p>双内核检索 + 独立 AI 对话</p>
+        </div>
       </div>
-      
+
       <div class="sidebar-menu-container">
-        <el-menu :default-active="$route.path" router class="app-menu" :popper-offset="16">
-          <el-menu-item index="/chat" class="menu-item-custom">
+        <el-menu :default-active="$route.path" router class="app-menu">
+          <el-menu-item index="/workspace/entry" class="menu-item-custom">
+            <el-icon><Grid /></el-icon>
+            <template #title>工作台入口</template>
+          </el-menu-item>
+          <el-menu-item index="/workspace/ai/chat" class="menu-item-custom">
             <el-icon><ChatDotRound /></el-icon>
-            <template #title>对话聊天</template>
+            <template #title>AI 对话</template>
           </el-menu-item>
-          <el-menu-item v-if="authStore.isAdmin()" index="/dashboard/corpora" class="menu-item-custom">
+          <el-menu-item index="/workspace/novel/upload" class="menu-item-custom">
+            <el-icon><Reading /></el-icon>
+            <template #title>小说上传线路</template>
+          </el-menu-item>
+          <el-menu-item index="/workspace/novel/chat" class="menu-item-custom">
+            <el-icon><ChatLineRound /></el-icon>
+            <template #title>小说问答</template>
+          </el-menu-item>
+          <el-menu-item index="/workspace/kb/upload" class="menu-item-custom">
             <el-icon><Files /></el-icon>
-            <template #title>知识库管理</template>
+            <template #title>企业库上传线路</template>
           </el-menu-item>
-          <el-menu-item v-if="authStore.isAdmin()" index="/dashboard/evaluation" class="menu-item-custom">
+          <el-menu-item index="/workspace/kb/chat" class="menu-item-custom">
             <el-icon><DataLine /></el-icon>
-            <template #title>评测与监控</template>
+            <template #title>企业库问答</template>
           </el-menu-item>
         </el-menu>
       </div>
 
       <div class="sidebar-footer">
+        <div class="mode-summary">
+          <span class="mode-label">当前工作区</span>
+          <strong>{{ currentMode }}</strong>
+        </div>
         <el-dropdown trigger="click" @command="handleCommand" placement="top-start" class="user-dropdown">
           <div class="user-profile">
-            <el-avatar :size="36" class="user-avatar">{{ userInitial }}</el-avatar>
+            <el-avatar :size="38" class="user-avatar">{{ userInitial }}</el-avatar>
             <div class="user-info">
-              <span class="user-name">{{ authStore.user?.email?.split('@')[0] || 'User' }}</span>
-              <span class="user-role">{{ authStore.isAdmin() ? 'Administrator' : 'Member' }}</span>
+              <span class="user-name">{{ authStore.user?.email || 'member@local' }}</span>
+              <span class="user-role">{{ authStore.isAdmin() ? '管理员' : '成员' }}</span>
             </div>
             <el-icon class="dropdown-icon"><MoreFilled /></el-icon>
           </div>
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="logout">
-                <el-icon><SwitchButton /></el-icon>退出登录
+                <el-icon><SwitchButton /></el-icon>
+                退出登录
               </el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
       </div>
     </el-aside>
-    
+
     <el-container class="main-content-wrapper">
       <el-main class="app-main">
         <router-view v-slot="{ Component }">
@@ -59,17 +79,41 @@
 </template>
 
 <script setup lang="ts">
-import { useAuthStore } from '@/store/auth';
-import { useRouter } from 'vue-router';
-import { ChatDotRound, Files, DataLine, Platform, MoreFilled, SwitchButton } from '@element-plus/icons-vue';
 import { computed } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { useAuthStore } from '@/store/auth';
+import {
+  ChatDotRound,
+  ChatLineRound,
+  DataLine,
+  Files,
+  Grid,
+  MoreFilled,
+  Platform,
+  Reading,
+  SwitchButton
+} from '@element-plus/icons-vue';
 
 const authStore = useAuthStore();
+const route = useRoute();
 const router = useRouter();
 
 const userInitial = computed(() => {
   const email = authStore.user?.email || '?';
   return email.charAt(0).toUpperCase();
+});
+
+const currentMode = computed(() => {
+  if (route.path.includes('/workspace/ai/')) {
+    return 'AI 对话';
+  }
+  if (route.path.includes('/workspace/novel/')) {
+    return '小说内核';
+  }
+  if (route.path.includes('/workspace/kb/')) {
+    return '企业知识库内核';
+  }
+  return '入口选择';
 });
 
 const handleCommand = (command: string) => {
@@ -83,89 +127,104 @@ const handleCommand = (command: string) => {
 <style scoped>
 .main-layout {
   height: 100vh;
-  background-color: var(--bg-base);
+  background:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.12), transparent 30%),
+    radial-gradient(circle at bottom right, rgba(15, 118, 110, 0.14), transparent 35%),
+    var(--bg-base);
 }
 
 .app-sidebar {
-  background-color: var(--bg-sidebar);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.98));
   border-right: 1px solid var(--border-color-light);
   display: flex;
   flex-direction: column;
-  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.02);
+  box-shadow: 8px 0 32px rgba(15, 23, 42, 0.05);
   z-index: 10;
-  transition: width 0.3s ease;
 }
 
 .sidebar-header {
-  height: 72px;
   display: flex;
   align-items: center;
-  padding: 0 20px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  gap: 14px;
+  padding: 22px 20px 18px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
 }
 
 .logo-circle-mini {
-  width: 32px;
-  height: 32px;
-  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-primary-light-3) 100%);
-  border-radius: 10px;
+  width: 42px;
+  height: 42px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-right: 12px;
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
-}
-
-.logo-circle-mini :deep(.el-icon) {
-  color: #fff !important;
+  border-radius: 14px;
+  color: #fff;
+  background: linear-gradient(135deg, #2563eb, #0f766e);
+  box-shadow: 0 12px 24px rgba(37, 99, 235, 0.28);
 }
 
 .sidebar-header h2 {
   margin: 0;
   font-size: 18px;
   font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.3px;
+}
+
+.sidebar-header p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .sidebar-menu-container {
   flex: 1;
-  padding: 20px 16px;
+  padding: 18px 14px;
   overflow-y: auto;
 }
 
 .app-menu {
   border-right: none;
-  background-color: transparent;
+  background: transparent;
 }
 
 .menu-item-custom {
-  height: 48px;
-  line-height: 48px;
+  height: 50px;
+  line-height: 50px;
   margin-bottom: 8px;
-  border-radius: 12px;
+  border-radius: 14px;
   color: var(--text-regular);
-  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.22s ease;
 }
 
 .menu-item-custom:hover {
-  background-color: var(--bg-base);
+  background: rgba(59, 130, 246, 0.08);
   color: var(--text-primary);
-  transform: translateX(4px);
+  transform: translateX(3px);
 }
 
 .menu-item-custom.is-active {
-  background-color: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(15, 118, 110, 0.1));
+  color: #1d4ed8;
   font-weight: 600;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.1);
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.08);
 }
 
-/* User Profile Footer */
 .sidebar-footer {
   padding: 16px;
   border-top: 1px solid var(--border-color-light);
-  background: linear-gradient(to top, var(--bg-surface) 50%, transparent);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.9));
+}
+
+.mode-summary {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.03);
+}
+
+.mode-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .user-dropdown {
@@ -175,32 +234,30 @@ const handleCommand = (command: string) => {
 .user-profile {
   display: flex;
   align-items: center;
+  gap: 12px;
   padding: 10px 12px;
   border-radius: 14px;
   cursor: pointer;
-  transition: all 0.2s ease;
   border: 1px solid transparent;
+  transition: all 0.22s ease;
 }
 
 .user-profile:hover {
-  background-color: var(--bg-base);
+  background: rgba(255, 255, 255, 0.72);
   border-color: var(--border-color-light);
-  box-shadow: 0 2px 6px rgba(0,0,0,0.02);
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, var(--el-color-primary-light-3) 0%, var(--el-color-primary) 100%);
-  color: white;
-  font-weight: 600;
-  margin-right: 12px;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+  background: linear-gradient(135deg, #2563eb, #0f766e);
+  color: #fff;
+  font-weight: 700;
 }
 
 .user-info {
+  min-width: 0;
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 
 .user-name {
@@ -210,64 +267,43 @@ const handleCommand = (command: string) => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.2;
 }
 
-.user-role {
+.user-role,
+.dropdown-icon {
   font-size: 12px;
   color: var(--text-secondary);
-  margin-top: 4px;
-}
-
-.dropdown-icon {
-  color: var(--text-placeholder);
 }
 
 .main-content-wrapper {
-  background-color: var(--bg-base);
-  position: relative;
+  background: transparent;
 }
 
 .app-main {
-  padding: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
   height: 100%;
+  padding: 20px;
+  overflow: auto;
 }
 
-/* Page Transitions */
-.fade-transform-enter-active,
-.fade-transform-leave-active {
-  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.fade-transform-enter-from {
-  opacity: 0;
-  transform: translateY(15px);
-}
-
-.fade-transform-leave-to {
-  opacity: 0;
-  transform: translateY(-15px);
-}
-
-/* 响应式移动端适配补充 */
-@media screen and (max-width: 768px) {
+@media screen and (max-width: 960px) {
   .app-sidebar {
-    width: 60px !important;
+    width: 78px !important;
   }
-  .sidebar-header h2 {
-    display: none;
-  }
-  .menu-item-custom :deep(.el-menu-item__title) {
-    display: none;
-  }
+
+  .sidebar-header h2,
+  .sidebar-header p,
+  .mode-summary,
   .user-info {
     display: none;
   }
+
+  .sidebar-header {
+    justify-content: center;
+    padding: 20px 10px;
+  }
+
   .logo-circle-mini {
-    margin-right: 0;
+    margin: 0;
   }
 }
 </style>
