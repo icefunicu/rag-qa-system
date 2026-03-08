@@ -1,4 +1,4 @@
-import request from './request';
+import request, { streamRequest, type StreamRequestOptions } from './request';
 
 export function listKnowledgeBases() {
   return request.get('/kb/bases');
@@ -43,4 +43,13 @@ export function queryKB(data: {
   debug?: boolean;
 }) {
   return request.post('/kb/query', data);
+}
+
+export function streamKBQuery(data: {
+  base_id: string;
+  question: string;
+  document_ids?: string[];
+  debug?: boolean;
+}, options?: StreamRequestOptions) {
+  return streamRequest('/api/v1/kb/query/stream', data, options);
 }

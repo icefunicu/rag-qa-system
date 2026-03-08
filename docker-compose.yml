@@ -14,7 +14,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-rag}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -22,6 +22,23 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    logging: *default-logging
+
+  db-bootstrap:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
+      PGHOST: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:-rag}
+    volumes:
+      - ./infra/postgres/init/000_dual_kernel_bootstrap.sh:/bootstrap/000_dual_kernel_bootstrap.sh:ro
+    entrypoint: ["/bin/sh", "/bootstrap/000_dual_kernel_bootstrap.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
     logging: *default-logging
 
   novel-service:
@@ -42,10 +59,10 @@ services:
     volumes:
       - ./data/novel:/data/novel
     ports:
-      - "8100:8100"
+      - "${NOVEL_HOST_PORT:-8100}:8100"
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=3)"]
       interval: 5s
@@ -71,10 +88,10 @@ services:
     volumes:
       - ./data/kb:/data/kb
     ports:
-      - "8200:8200"
+      - "${KB_HOST_PORT:-8300}:8200"
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/healthz', timeout=3)"]
       interval: 5s
@@ -109,7 +126,7 @@ services:
       AI_SYSTEM_PROMPT: ${AI_SYSTEM_PROMPT:-}
       AI_EXTRA_BODY_JSON: ${AI_EXTRA_BODY_JSON:-{}}
     ports:
-      - "8080:8080"
+      - "${GATEWAY_HOST_PORT:-8080}:8080"
     depends_on:
       novel-service:
         condition: service_healthy

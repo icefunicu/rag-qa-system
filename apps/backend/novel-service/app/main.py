@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 from pathlib import Path
@@ -14,6 +13,7 @@ from pydantic import BaseModel
 
 from shared.auth import CurrentUser
 from shared.logging import setup_logging
+from shared.sse import iter_query_sse_messages
 
 from .db import NovelDatabase, to_json
 from .parsing import ParsedNovel, parse_novel_text, read_text_with_fallback
@@ -479,10 +479,6 @@ def stream_query_novel(payload: NovelQueryRequest, user: CurrentUser) -> Streami
     result = _query_novel(payload)
 
     def generate() -> Any:
-        yield f"event: metadata\ndata: {json.dumps({'strategy_used': result['strategy_used'], 'evidence_status': result['evidence_status']}, ensure_ascii=False)}\n\n"
-        for citation in result["citations"]:
-            yield f"event: citation\ndata: {json.dumps(citation, ensure_ascii=False)}\n\n"
-        yield f"event: answer\ndata: {json.dumps({'answer': result['answer'], 'grounding_score': result['grounding_score']}, ensure_ascii=False)}\n\n"
-        yield "event: done\ndata: {}\n\n"
+        yield from iter_query_sse_messages(result)
 
     return StreamingResponse(generate(), media_type="text/event-stream")

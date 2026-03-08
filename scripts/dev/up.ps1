@@ -13,7 +13,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "common.ps1")
+. "$PSScriptRoot\common.ps1"
 
 try {
     $repoRoot = Get-RepoRoot
@@ -26,6 +26,7 @@ try {
 
     $services = Get-ComposeServices
     Write-Info "Compose services: $($services -join ', ')"
+    Reset-ComposeOneShotServices -ServiceNames @("db-bootstrap")
 
     if ($SkipPull) {
         Write-Info "Skipping remote image pull."

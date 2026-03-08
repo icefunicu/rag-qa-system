@@ -1,7 +1,23 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+function Convert-ToPlainPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ($Path -match '^[\\]{2}\?[\\]UNC[\\](?<unc>.+)$') {
+        return "\\$($matches['unc'])"
+    }
+
+    if ($Path -match '^[\\]{2}\?[\\](?<drive>[A-Za-z]:.*)$') {
+        return $matches['drive']
+    }
+
+    return $Path
+}
+
+$scriptRoot = Convert-ToPlainPath -Path $PSScriptRoot
+$script:RepoRoot = (Resolve-Path (Join-Path $scriptRoot "..\..")).Path
+$script:RepoRoot = Convert-ToPlainPath -Path $script:RepoRoot
 $script:DevStateDir = Join-Path $script:RepoRoot "logs\dev"
 $script:FrontendPidFile = Join-Path $script:DevStateDir "frontend.pid"
 $script:FrontendLogFile = Join-Path $script:DevStateDir "frontend.log"
@@ -222,6 +238,47 @@ function Get-EnvSettings {
     return $script:EnvSettingsCache
 }
 
+function Get-EnvIntSetting {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][int]$DefaultValue
+    )
+
+    $settings = Get-EnvSettings
+    if (-not $settings.ContainsKey($Name)) {
+        return $DefaultValue
+    }
+
+    $raw = [string]$settings[$Name]
+    if (-not $raw.Trim()) {
+        return $DefaultValue
+    }
+
+    $parsed = 0
+    if ([int]::TryParse($raw.Trim(), [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed
+    }
+
+    Write-Warn "Invalid integer value for $Name in .env: '$raw'. Falling back to $DefaultValue."
+    return $DefaultValue
+}
+
+function Get-PostgresHostPort {
+    return Get-EnvIntSetting -Name "POSTGRES_HOST_PORT" -DefaultValue 5432
+}
+
+function Get-GatewayHostPort {
+    return Get-EnvIntSetting -Name "GATEWAY_HOST_PORT" -DefaultValue 8080
+}
+
+function Get-NovelHostPort {
+    return Get-EnvIntSetting -Name "NOVEL_HOST_PORT" -DefaultValue 8100
+}
+
+function Get-KBHostPort {
+    return Get-EnvIntSetting -Name "KB_HOST_PORT" -DefaultValue 8300
+}
+
 function Assert-LocalOllamaReady {
     return
 }
@@ -346,9 +403,9 @@ function Wait-CoreServices {
     )
 
     $targets = @(
-        @{ Name = "gateway"; Url = "http://localhost:8080/healthz" },
-        @{ Name = "novel-service"; Url = "http://localhost:8100/healthz" },
-        @{ Name = "kb-service"; Url = "http://localhost:8200/healthz" }
+        @{ Name = "gateway"; Url = "http://localhost:$((Get-GatewayHostPort))/healthz" },
+        @{ Name = "novel-service"; Url = "http://localhost:$((Get-NovelHostPort))/healthz" },
+        @{ Name = "kb-service"; Url = "http://localhost:$((Get-KBHostPort))/healthz" }
     )
 
     foreach ($target in $targets) {
@@ -587,10 +644,10 @@ function Write-ProjectSummary {
 
     Write-Host ""
     Write-Host "[DONE] Project is ready."
-    Write-Host "Gateway:         http://localhost:8080"
-    Write-Host "Novel Service:   http://localhost:8100"
-    Write-Host "KB Service:      http://localhost:8200"
-    Write-Host "PostgreSQL:      localhost:5432"
+    Write-Host "Gateway:         http://localhost:$(Get-GatewayHostPort)"
+    Write-Host "Novel Service:   http://localhost:$(Get-NovelHostPort)"
+    Write-Host "KB Service:      http://localhost:$(Get-KBHostPort)"
+    Write-Host "PostgreSQL:      localhost:$(Get-PostgresHostPort)"
 
     if (-not $FrontendSkipped) {
         if ($null -ne $FrontendInfo) {

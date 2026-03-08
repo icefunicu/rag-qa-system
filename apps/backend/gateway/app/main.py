@@ -5,7 +5,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
@@ -67,16 +67,22 @@ async def _iter_upstream_bytes(response: httpx.Response) -> AsyncIterator[bytes]
         yield chunk
 
 
+async def _close_upstream(response: httpx.Response, client: httpx.AsyncClient) -> None:
+    await response.aclose()
+    await client.aclose()
+
+
 async def _proxy_request(
     request: Request,
     *,
     service_base_url: str,
     service_path: str,
-) -> StreamingResponse:
+) -> Response:
     target_url = f"{service_base_url}{service_path}"
     logger.info("proxy request method=%s target=%s", request.method, target_url)
     timeout = httpx.Timeout(REQUEST_TIMEOUT_SECONDS)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    client = httpx.AsyncClient(timeout=timeout)
+    try:
         upstream = await client.send(
             client.build_request(
                 method=request.method,
@@ -92,13 +98,29 @@ async def _proxy_request(
             for key, value in upstream.headers.items()
             if key.lower() not in HOP_BY_HOP_HEADERS
         }
-        return StreamingResponse(
-            _iter_upstream_bytes(upstream),
+        media_type = upstream.headers.get("content-type")
+        if media_type and media_type.startswith("text/event-stream"):
+            return StreamingResponse(
+                _iter_upstream_bytes(upstream),
+                status_code=upstream.status_code,
+                headers=response_headers,
+                background=BackgroundTask(_close_upstream, upstream, client),
+                media_type=media_type,
+            )
+
+        try:
+            body = await upstream.aread()
+        finally:
+            await _close_upstream(upstream, client)
+        return Response(
+            content=body,
             status_code=upstream.status_code,
             headers=response_headers,
-            background=BackgroundTask(upstream.aclose),
-            media_type=upstream.headers.get("content-type"),
+            media_type=media_type,
         )
+    except Exception:
+        await client.aclose()
+        raise
 
 
 def _normalize_ai_messages(payload: AIChatRequest) -> list[dict[str, str]]:
@@ -215,7 +237,7 @@ async def ai_chat(payload: AIChatRequest, user: CurrentUser) -> dict[str, Any]:
     "/api/v1/novel/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
-async def proxy_novel(path: str, request: Request) -> StreamingResponse:
+async def proxy_novel(path: str, request: Request) -> Response:
     return await _proxy_request(
         request,
         service_base_url=NOVEL_SERVICE_URL,
@@ -227,7 +249,7 @@ async def proxy_novel(path: str, request: Request) -> StreamingResponse:
     "/api/v1/kb/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
-async def proxy_kb(path: str, request: Request) -> StreamingResponse:
+async def proxy_kb(path: str, request: Request) -> Response:
     return await _proxy_request(
         request,
         service_base_url=KB_SERVICE_URL,

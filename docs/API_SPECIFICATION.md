@@ -7,18 +7,21 @@
 ### Gateway
 
 - 默认地址：`http://localhost:8080`
+- 可通过根目录 `.env` 中的 `GATEWAY_HOST_PORT` 覆盖宿主机端口
 - 职责：登录认证、身份透传、路由聚合、AI 对话代理
 - 对外前缀：`/api/v1`
 
 ### Novel Service
 
 - 默认地址：`http://localhost:8100`
+- 可通过根目录 `.env` 中的 `NOVEL_HOST_PORT` 覆盖宿主机端口
 - 职责：小说库管理、TXT 上传、章节/场景索引、剧情问答
 - 通过 `gateway` 暴露为 `/api/v1/novel/*`
 
 ### KB Service
 
-- 默认地址：`http://localhost:8200`
+- 默认地址：`http://localhost:8300`
+- 可通过根目录 `.env` 中的 `KB_HOST_PORT` 覆盖宿主机端口；容器内服务端口仍为 `8200`
 - 职责：知识库管理、多文件上传、事实问答
 - 通过 `gateway` 暴露为 `/api/v1/kb/*`
 
@@ -178,6 +181,13 @@ Authorization: Bearer <access_token>
 | `POST` | `/api/v1/novel/query` | 非流式问答 |
 | `POST` | `/api/v1/novel/query/stream` | SSE 流式问答 |
 
+SSE 事件约定，适用于 `/api/v1/novel/query/stream` 与 `/api/v1/kb/query/stream`：
+
+- `metadata`：先返回策略、证据状态、拒答原因
+- `citation`：返回 0 到多条引用
+- `answer`：可能返回多次，`answer` 字段按累积文本递增，最后一条为完整答案
+- `done`：流式输出结束
+
 请求体：
 
 ```json
@@ -295,7 +305,7 @@ Authorization: Bearer <access_token>
 3. POST /api/v1/novel/documents/upload
 4. GET  /api/v1/novel/documents/{document_id}
 5. GET  /api/v1/novel/documents/{document_id}/events
-6. POST /api/v1/novel/query
+6. POST /api/v1/novel/query 或 /api/v1/novel/query/stream
 ```
 
 ### 企业库线路
@@ -306,5 +316,5 @@ Authorization: Bearer <access_token>
 3. POST /api/v1/kb/documents/upload
 4. GET  /api/v1/kb/documents/{document_id}
 5. GET  /api/v1/kb/documents/{document_id}/events
-6. POST /api/v1/kb/query
+6. POST /api/v1/kb/query 或 /api/v1/kb/query/stream
 ```

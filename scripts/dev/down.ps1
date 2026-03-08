@@ -8,7 +8,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-. (Join-Path $PSScriptRoot "common.ps1")
+. "$PSScriptRoot\common.ps1"
 
 $repoRoot = Get-RepoRoot
 Set-Location $repoRoot

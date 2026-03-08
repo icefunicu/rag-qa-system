@@ -1,4 +1,4 @@
-import request from './request';
+import request, { streamRequest, type StreamRequestOptions } from './request';
 
 export function listNovelLibraries() {
   return request.get('/novel/libraries');
@@ -47,3 +47,11 @@ export function queryNovel(data: {
   return request.post('/novel/query', data);
 }
 
+export function streamNovelQuery(data: {
+  library_id: string;
+  question: string;
+  document_ids?: string[];
+  debug?: boolean;
+}, options?: StreamRequestOptions) {
+  return streamRequest('/api/v1/novel/query/stream', data, options);
+}

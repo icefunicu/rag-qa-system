@@ -119,8 +119,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/up.ps1
 - 前端开发环境：`http://localhost:5173`
 - Gateway：`http://localhost:8080`
 - Novel Service：`http://localhost:8100`
-- KB Service：`http://localhost:8200`
+- KB Service：`http://localhost:8300`
 - PostgreSQL：`localhost:5432`
+
+宿主机端口可通过根目录 `.env` 中的 `GATEWAY_HOST_PORT`、`NOVEL_HOST_PORT`、`KB_HOST_PORT`、`POSTGRES_HOST_PORT` 覆盖；
+服务间调用仍固定使用容器内端口 `8080 / 8100 / 8200 / 5432`。
 
 默认本地账号：
 

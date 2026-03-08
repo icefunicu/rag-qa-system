@@ -97,7 +97,8 @@ docker compose ps
 重点确认：
 - `NOVEL_SERVICE_URL`、`KB_SERVICE_URL` 是否与 compose 服务名一致
 - 下游服务是否已通过健康检查
-- 端口是否仍然是 `8100 / 8200`
+- 端口是否仍然是 `8100 / 8300`，或是否被 `.env` 中的 `NOVEL_HOST_PORT / KB_HOST_PORT` 覆盖
+- Windows 如仍报端口不可绑定，可执行 `netsh interface ipv4 show excludedportrange protocol=tcp` 检查是否命中保留区间
 
 ## 场景 6：数据库初始化异常
 

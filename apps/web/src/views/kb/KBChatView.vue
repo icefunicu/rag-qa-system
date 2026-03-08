@@ -74,10 +74,11 @@
           <el-empty v-if="!result" description="选择知识库后开始提问" />
           <div v-else class="answer-panel">
             <div class="meta-row">
+              <el-tag v-if="asking" type="warning" effect="plain">流式接收中</el-tag>
               <el-tag type="info" effect="plain">{{ result.strategy_used }}</el-tag>
               <el-tag effect="plain">grounding {{ Number(result.grounding_score || 0).toFixed(2) }}</el-tag>
             </div>
-            <p class="answer-text">{{ result.answer }}</p>
+            <p class="answer-text">{{ result.answer || '正在接收问答结果...' }}</p>
             <el-alert
               v-if="result.refusal_reason"
               :title="`拒答原因：${result.refusal_reason}`"
@@ -96,11 +97,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import CitationList from '@/components/CitationList.vue';
-import { listKBDocuments, listKnowledgeBases, queryKB } from '@/api/kb';
+import { listKBDocuments, listKnowledgeBases, queryKB, streamKBQuery } from '@/api/kb';
+import { isAbortRequestError } from '@/api/request';
+import { applyQueryStreamEvent, createEmptyQueryResult, resolveQueryStreamPayload, type QueryResult } from '@/utils/queryStream';
 import { statusMeta } from '@/utils/status';
 
 const router = useRouter();
@@ -112,7 +115,9 @@ const selectedBaseId = ref('');
 const selectedDocumentIds = ref<string[]>([]);
 const question = ref('');
 const asking = ref(false);
-const result = ref<any | null>(null);
+const result = ref<QueryResult | null>(null);
+
+let currentController: AbortController | null = null;
 
 const shortcuts = [
   '这份制度的审批要求是什么？',
@@ -124,6 +129,18 @@ const shortcuts = [
 const queryableDocuments = computed(() => {
   return documents.value.filter((document) => ['fast_index_ready', 'enhancing', 'ready'].includes(document.status));
 });
+
+const buildPayload = () => ({
+  base_id: selectedBaseId.value,
+  question: question.value.trim(),
+  document_ids: selectedDocumentIds.value
+});
+
+const stopStreaming = () => {
+  currentController?.abort();
+  currentController = null;
+  asking.value = false;
+};
 
 const loadBases = async () => {
   const res: any = await listKnowledgeBases();
@@ -142,7 +159,7 @@ const loadDocuments = async (baseId: string) => {
   }
 };
 
-const ask = async () => {
+const askOnce = async () => {
   if (!selectedBaseId.value) {
     ElMessage.warning('请先选择知识库');
     return;
@@ -157,22 +174,77 @@ const ask = async () => {
       base_id: selectedBaseId.value,
       question: question.value.trim(),
       document_ids: selectedDocumentIds.value
-    });
+    }) as unknown as QueryResult;
   } finally {
     asking.value = false;
   }
 };
 
+const ask = async () => {
+  if (!selectedBaseId.value) {
+    ElMessage.warning('请先选择知识库');
+    return;
+  }
+  if (!question.value.trim()) {
+    ElMessage.warning('请输入问题');
+    return;
+  }
+
+  stopStreaming();
+  asking.value = true;
+  result.value = createEmptyQueryResult();
+
+  const payload = buildPayload();
+  const controller = new AbortController();
+  currentController = controller;
+
+  try {
+    await streamKBQuery(payload, {
+      signal: controller.signal,
+      onEvent: (event) => {
+        result.value = applyQueryStreamEvent(
+          result.value || createEmptyQueryResult(),
+          event.event,
+          resolveQueryStreamPayload(event.data)
+        );
+      }
+    });
+  } catch (error) {
+    if (isAbortRequestError(error)) {
+      return;
+    }
+    ElMessage.warning('流式问答失败，已回退为普通查询');
+    await askOnce();
+  } finally {
+    if (currentController === controller) {
+      currentController = null;
+      asking.value = false;
+    }
+  }
+};
+
 watch(selectedBaseId, (baseId) => {
+  stopStreaming();
+  result.value = null;
+  selectedDocumentIds.value = [];
   if (!baseId) {
     documents.value = [];
     return;
   }
-  void loadDocuments(baseId);
+  void loadDocuments(baseId).catch(() => {
+    documents.value = [];
+  });
 });
 
-onMounted(async () => {
-  await loadBases();
+onMounted(() => {
+  void loadBases().catch(() => {
+    bases.value = [];
+    documents.value = [];
+  });
+});
+
+onBeforeUnmount(() => {
+  stopStreaming();
 });
 </script>
 
