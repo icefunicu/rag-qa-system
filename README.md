@@ -48,6 +48,7 @@
 - [快速开始](#快速开始)
 - [第一次使用怎么走](#第一次使用怎么走)
 - [默认地址与账号](#默认地址与账号)
+- [后端 .env 配置](#后端-env-配置)
 - [支持的文件与连接器](#支持的文件与连接器)
 - [系统架构](#系统架构)
 - [关键接口](#关键接口)
@@ -56,6 +57,7 @@
 - [开发与运维](#开发与运维)
 - [项目结构](#项目结构)
 - [安全与边界](#安全与边界)
+- [常见问题](#常见问题)
 - [验证命令](#验证命令)
 - [更多说明](#更多说明)
 
@@ -211,23 +213,282 @@ make down
 
 ## 第一次使用怎么走
 
-如果你不是开发者，按下面顺序理解最简单：
+这一节改成可直接照做的操作手册，分两条路径：
 
-1. 打开前端页面。
-2. 用默认账号登录。
-3. 创建一个知识库。
-4. 上传一份制度或说明文档。
-5. 等待文档状态变成可查询。
-6. 在问答页提问。
-7. 看回答是否附带引用和证据。
+- 简单版：适合先验证“系统能不能跑、能不能回答”
+- 企业级版：适合接入真实资料，并打开数据同步能力
 
-如果你更偏技术，可以这样验证：
+### 简单版操作手册
 
-1. 登录获取 token。
-2. 调用知识库创建接口。
-3. 上传文档。
-4. 轮询 ingest job。
-5. 调用 `/api/v1/kb/query` 或统一聊天接口。
+适合第一次本地体验，目标是在 10 到 20 分钟内完成一次完整问答闭环。
+
+1. 准备环境变量。
+   在仓库根目录执行：
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+   然后至少补齐 `JWT_SECRET` 和 `LLM_API_KEY`。如果你直接用默认 Docker 配置，本地数据库、MinIO、Qdrant 配置通常不用再改。
+
+2. 做启动前检查。
+
+   ```powershell
+   make preflight
+   ```
+
+   期望结果是检查通过，没有编码、构建或 compose 配置错误。
+
+3. 初始化基础设施并启动项目。
+
+   ```powershell
+   make init
+   make up
+   ```
+
+   启动完成后，确认下面两个地址可访问：
+
+   - `http://localhost:8080/readyz`
+   - `http://localhost:8300/readyz`
+
+4. 登录前端。
+
+   打开 `http://localhost:5173`，使用默认管理员账号登录：
+
+   - 邮箱：`admin@local`
+   - 密码：`ChangeMe123!`
+
+5. 创建知识库。
+
+   在前端新建一个知识库，例如：
+
+   - 名称：`HR 手册`
+   - 分类：`policy`
+   - 描述：`员工制度和审批流程`
+
+6. 上传一份测试文档。
+
+   建议先上传一份小的 `txt`、`pdf` 或 `docx` 文件，例如报销制度、请假制度或入职手册。上传后等待文档状态从：
+
+   - `uploaded`
+   - `parsing_fast`
+   - `fast_index_ready`
+   - `hybrid_ready`
+   - `ready`
+
+   变成 `ready` 后再开始正式提问。
+
+7. 做一次检索验证。
+
+   如果你想先看召回质量，不让 LLM 生成答案，可以调用：
+
+   ```bash
+   curl -X POST http://localhost:8300/api/v1/kb/retrieve/debug \
+     -H "Authorization: Bearer <ACCESS_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "base_id": "<KB_ID>",
+       "question": "报销审批需要哪些角色签字？",
+       "document_ids": [],
+       "limit": 5
+     }'
+   ```
+
+   期望能看到 Top-K 召回结果、分数和重排结果。
+
+8. 做一次正式问答。
+
+   你可以在前端聊天页提问，也可以直接调接口：
+
+   ```bash
+   curl -X POST http://localhost:8300/api/v1/kb/query \
+     -H "Authorization: Bearer <ACCESS_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "base_id": "<KB_ID>",
+       "question": "报销审批需要哪些角色签字？",
+       "document_ids": []
+     }'
+   ```
+
+   期望结果：
+
+   - 返回 `answer`
+   - 返回 `citations`
+   - 返回 `trace_id`
+   - 如果命中充分，`evidence_status` 应接近 `grounded`
+
+9. 如果召回不理想，进入 chunk 治理。
+
+   你可以查看文档 chunk，并手工修正文案、拆分、合并或禁用噪音 chunk。最常用入口是：
+
+   - `GET /api/v1/kb/documents/{document_id}/chunks`
+   - `PATCH /api/v1/kb/chunks/{chunk_id}`
+   - `POST /api/v1/kb/chunks/{chunk_id}/split`
+   - `POST /api/v1/kb/chunks/merge`
+
+到这里，你已经完成了最小闭环：
+
+- 系统启动成功
+- 文档 ingest 成功
+- 检索可用
+- 回答可用
+- 结果可治理
+
+### 企业级操作手册（带数据同步）
+
+适合把系统接进真实业务资料，目标是让知识库从“手工上传”升级到“持续同步”。
+
+1. 先完成简单版第 1 到第 4 步。
+
+   企业级接入不是替代简单版，而是在它的基础上继续做数据接入和治理。
+
+2. 规划知识库边界。
+
+   不要一上来把所有资料全塞进一个库。建议按业务域拆分，例如：
+
+   - `HR 制度库`
+   - `法务合同库`
+   - `财务 FAQ 库`
+   - `内部产品文档库`
+
+   这样后续做权限、检索调试和运营分析会更清晰。
+
+3. 配置后端 `.env` 中的连接器变量。
+
+   最常见的是下面这组：
+
+   ```env
+   KB_LOCAL_CONNECTOR_ROOTS=E:\corp-docs;E:\shared\knowledge
+   KB_LOCAL_CONNECTOR_MAX_FILES=256
+
+   KB_NOTION_CONNECTOR_ENABLED=true
+   KB_NOTION_API_TOKEN=secret_xxx
+   KB_NOTION_API_BASE_URL=https://api.notion.com/v1
+   KB_NOTION_API_VERSION=2022-06-28
+
+   FEISHU_DOC_AUTH=Bearer your-feishu-token
+   DINGTALK_DOC_AUTH=Bearer your-dingtalk-token
+   REPORTING_DB_DSN=postgresql://user:password@host:5432/reporting
+   ```
+
+4. 接入企业本地目录连接器。
+
+   适合已经沉淀在共享盘、服务器目录或挂载盘里的文档。
+
+   操作顺序：
+
+   1. 把可同步目录加入 `KB_LOCAL_CONNECTOR_ROOTS`
+   2. 创建目标知识库，例如 `HR 制度库`
+   3. 先用 `dry_run=true` 预览变更
+   4. 确认后执行正式同步
+
+   预演示例：
+
+   ```bash
+   curl -X POST http://localhost:8300/api/v1/kb/connectors/local-directory/sync \
+     -H "Authorization: Bearer <ACCESS_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "base_id": "<KB_ID>",
+       "source_path": "E:\\corp-docs\\hr",
+       "category": "hr-policy",
+       "recursive": true,
+       "delete_missing": true,
+       "dry_run": true,
+       "max_files": 200
+     }'
+   ```
+
+   正式执行时，把 `dry_run` 改成 `false`。如果源目录里文件删除了，且 `delete_missing=true`，系统会把对应知识库文档做软删除同步。
+
+5. 接入 Notion 连接器。
+
+   适合团队把制度、FAQ、产品说明写在 Notion 中的场景。
+
+   操作顺序：
+
+   1. 在 Notion 创建 integration
+   2. 把目标页面授权给 integration
+   3. 在 `.env` 中配置 `KB_NOTION_CONNECTOR_ENABLED=true` 和 `KB_NOTION_API_TOKEN`
+   4. 从页面 URL 提取 page id
+   5. 先做一轮手工同步验证
+
+   示例：
+
+   ```bash
+   curl -X POST http://localhost:8300/api/v1/kb/connectors/notion/sync \
+     -H "Authorization: Bearer <ACCESS_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "base_id": "<KB_ID>",
+       "page_ids": ["xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"],
+       "category": "notion-docs",
+       "delete_missing": true,
+       "dry_run": false,
+       "max_pages": 20
+     }'
+   ```
+
+   同步后，Notion 页面会被转成 UTF-8 文本，再进入统一 ingest 流程。
+
+6. 如果你要长期运行，创建可调度连接器，而不是只用一次性同步接口。
+
+   这一步适合正式环境。你可以先创建连接器对象，再让系统定时执行。
+
+   示例：
+
+   ```bash
+   curl -X POST http://localhost:8300/api/v1/kb/connectors \
+     -H "Authorization: Bearer <ACCESS_TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "base_id": "<KB_ID>",
+       "name": "HR Local Directory",
+       "connector_type": "local_directory",
+       "config": {
+         "source_path": "E:\\corp-docs\\hr",
+         "category": "hr-policy",
+         "recursive": true,
+         "delete_missing": true,
+         "max_files": 200
+       },
+       "schedule": {
+         "enabled": true,
+         "interval_minutes": 60
+       }
+     }'
+   ```
+
+   然后可用下面两个入口：
+
+   - 手工执行单个连接器：`POST /api/v1/kb/connectors/{connector_id}/sync`
+   - 执行所有到期连接器：`POST /api/v1/kb/connectors/run-due`
+
+7. 接入后做质量验收，不要只看“同步成功”。
+
+   企业环境至少要检查四件事：
+
+   - 文档是否真的进入了目标知识库
+   - 检索调试页里是否能召回正确 chunk
+   - 正式问答是否有 `citations` 和合理 `grounding_score`
+   - Zero-hit 和反馈数据是否能指导后续治理
+
+8. 把治理流程纳入日常运维。
+
+   推荐每周至少做一次：
+
+   - 查看 `retrieve/debug` 里的低质量召回
+   - 修正噪音 chunk
+   - 关注 `analytics/dashboard` 中的 Zero-hit、热点问题和满意度趋势
+   - 根据新资料继续扩充本地目录、Notion、Web 或 SQL 数据源
+
+如果你是项目 Owner，建议第一次上线时按这个顺序推进：
+
+1. 先用简单版跑通单库问答。
+2. 再选一个真实业务域做企业级同步试点。
+3. 先从本地目录或 Notion 二选一开始，不要同时接太多源。
+4. 先稳定同步和检索质量，再扩大到飞书、钉钉、SQL 等更多数据源。
 
 ## 默认地址与账号
 
@@ -262,6 +523,296 @@ make down
 
 - 这些账号只适合本地开发
 - 非本地环境必须覆盖 `JWT_SECRET`、`ADMIN_PASSWORD`、`MEMBER_PASSWORD`
+
+## 后端 .env 配置
+
+如果你只是本地跑起来，最少需要确认这几组配置：
+
+- 认证与基础环境：`APP_ENV`、`JWT_SECRET`
+- 数据库：`KB_DATABASE_DSN`、`GATEWAY_DATABASE_DSN`
+- 对象存储：`OBJECT_STORAGE_ENDPOINT`、`OBJECT_STORAGE_ACCESS_KEY`、`OBJECT_STORAGE_SECRET_KEY`、`OBJECT_STORAGE_BUCKET`
+- 向量检索：`QDRANT_URL`、`QDRANT_COLLECTION`、`FASTEMBED_MODEL_NAME`、`FASTEMBED_SPARSE_MODEL_NAME`
+- LLM：`LLM_ENABLED`、`LLM_PROVIDER`、`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`
+
+### 一份本地可运行的最小示例
+
+```env
+APP_ENV=development
+JWT_SECRET=replace-this-in-local-env
+
+KB_DATABASE_DSN=postgresql://rag:rag@postgres:5432/kb_app
+GATEWAY_DATABASE_DSN=postgresql://rag:rag@postgres:5432/gateway_app
+
+OBJECT_STORAGE_ENDPOINT=http://minio:9000
+OBJECT_STORAGE_ACCESS_KEY=minioadmin
+OBJECT_STORAGE_SECRET_KEY=minioadmin
+OBJECT_STORAGE_BUCKET=rag-assets
+
+QDRANT_URL=http://qdrant:6333
+QDRANT_COLLECTION=kb-evidence
+FASTEMBED_MODEL_NAME=BAAI/bge-small-zh-v1.5
+FASTEMBED_SPARSE_MODEL_NAME=Qdrant/bm25
+
+LLM_ENABLED=true
+LLM_PROVIDER=openai-compatible
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_API_KEY=your-llm-api-key
+LLM_MODEL=qwen3.5-plus
+```
+
+### 连接器相关配置怎么写
+
+如果你要启用企业文档同步，建议把下面这些变量也补上：
+
+```env
+# 本地目录连接器
+# Windows 可用分号分隔多个根目录；Linux / macOS 使用冒号
+KB_LOCAL_CONNECTOR_ROOTS=E:\corp-docs;E:\shared\knowledge
+KB_LOCAL_CONNECTOR_MAX_FILES=256
+
+# Notion 连接器
+KB_NOTION_CONNECTOR_ENABLED=true
+KB_NOTION_API_TOKEN=secret_xxx
+KB_NOTION_API_BASE_URL=https://api.notion.com/v1
+KB_NOTION_API_VERSION=2022-06-28
+KB_NOTION_CONNECTOR_MAX_PAGES=32
+
+# URL / 飞书 / 钉钉鉴权头示例
+FEISHU_DOC_AUTH=Bearer your-feishu-token
+DINGTALK_DOC_AUTH=Bearer your-dingtalk-token
+
+# SQL 连接器示例
+REPORTING_DB_DSN=postgresql://user:password@host:5432/reporting
+```
+
+说明：
+
+- `KB_LOCAL_CONNECTOR_ROOTS` 之外的目录不能被本地目录连接器扫描
+- `KB_NOTION_CONNECTOR_ENABLED=true` 且 `KB_NOTION_API_TOKEN` 非空时，Notion 同步才会启用
+- `FEISHU_DOC_AUTH`、`DINGTALK_DOC_AUTH`、`REPORTING_DB_DSN` 这些名字不是写死的
+- 真正生效的是连接器请求体里的 `header_value_env` 或 `dsn_env`，它们会去读取你在部署环境里配置的环境变量名
+- 不要把真实 `LLM_API_KEY`、Notion token、数据库连接串提交到仓库
+
+### 连接器配置详解
+
+连接器配置建议分成两层理解：
+
+- 环境变量层：放敏感信息、白名单目录、平台开关
+- 连接器请求体层：放某个知识库要同步哪些目录、哪些页面、哪些 URL、多久同步一次
+
+为什么这样做：
+
+- 敏感信息放 `.env` 更安全，不会跟随连接器对象被持久化到业务表
+- 连接器对象只保存“要同步什么”和“怎么调度”，更适合审计、回放和多人协作
+- 同一个密钥或数据源可以被多个连接器复用，不需要每次重复写密文
+
+#### 1. 本地目录连接器要怎么配置
+
+核心环境变量：
+
+- `KB_LOCAL_CONNECTOR_ROOTS`
+- `KB_LOCAL_CONNECTOR_MAX_FILES`
+
+推荐写法：
+
+```env
+# Windows
+KB_LOCAL_CONNECTOR_ROOTS=E:\corp-docs;E:\shared\knowledge
+
+# Linux / macOS
+KB_LOCAL_CONNECTOR_ROOTS=/mnt/corp-docs:/srv/shared/knowledge
+
+KB_LOCAL_CONNECTOR_MAX_FILES=256
+```
+
+每个值的含义：
+
+- `KB_LOCAL_CONNECTOR_ROOTS`
+  定义允许被扫描的白名单根目录。只有这个范围内的目录才能通过连接器同步。
+- `KB_LOCAL_CONNECTOR_MAX_FILES`
+  限制单次同步最多处理多少个支持格式文件，避免误扫整盘、误扫海量目录或拖垮首次同步。
+
+这些值从哪来：
+
+- `KB_LOCAL_CONNECTOR_ROOTS`
+  来自你部署机器上真实挂载的企业共享目录、NAS 挂载目录或业务资料目录。
+- `KB_LOCAL_CONNECTOR_MAX_FILES`
+  来自你对单次同步规模的控制要求。第一次通常建议从 `100` 到 `300` 开始。
+
+为什么这么配：
+
+- 本地目录连接器会直接访问服务所在机器的文件系统，不做白名单就是安全风险
+- 大目录第一次很容易误扫过多文档，所以需要上限保护
+- 先从小目录开始，可以更快完成首轮 ingest、调试 chunk 质量和纠正错误分类
+
+接口请求体里最重要的字段：
+
+- `source_path`
+- `recursive`
+- `delete_missing`
+- `dry_run`
+- `max_files`
+- `category`
+
+推荐原则：
+
+- `source_path`
+  写成某个明确的业务目录，不要直接指到盘符根目录
+- `recursive=true`
+  当资料分多层目录时使用；如果目录结构很乱，第一次也可以先关掉
+- `delete_missing=true`
+  适合把知识库和源目录保持一致；如果你担心误删，可以第一次先设成 `false`
+- `dry_run=true`
+  第一次一定建议先开，先看系统准备创建、更新、删除多少文档
+- `category`
+  建议映射成业务标签，例如 `hr-policy`、`finance-faq`、`legal-contract`
+
+#### 2. Notion 连接器要怎么配置
+
+核心环境变量：
+
+- `KB_NOTION_CONNECTOR_ENABLED`
+- `KB_NOTION_API_TOKEN`
+- `KB_NOTION_API_BASE_URL`
+- `KB_NOTION_API_VERSION`
+- `KB_NOTION_CONNECTOR_MAX_PAGES`
+
+推荐写法：
+
+```env
+KB_NOTION_CONNECTOR_ENABLED=true
+KB_NOTION_API_TOKEN=secret_xxx
+KB_NOTION_API_BASE_URL=https://api.notion.com/v1
+KB_NOTION_API_VERSION=2022-06-28
+KB_NOTION_CONNECTOR_MAX_PAGES=32
+```
+
+这些值从哪来：
+
+- `KB_NOTION_CONNECTOR_ENABLED`
+  由你决定是否在当前环境启用 Notion 集成
+- `KB_NOTION_API_TOKEN`
+  来自 Notion integration
+  获取方式：进入 Notion 开发者后台，创建 integration，然后复制 Internal Integration Token
+- `KB_NOTION_API_BASE_URL`
+  默认用官方 API 地址，一般不需要改
+- `KB_NOTION_API_VERSION`
+  用 Notion API 版本号，建议和当前实现保持一致
+- `KB_NOTION_CONNECTOR_MAX_PAGES`
+  控制单次同步最多拉取多少个页面，避免一次导入过大
+
+为什么这么配：
+
+- Notion 是受权限控制的，只有 integration 被授权到的页面才能读取
+- token 是敏感信息，必须放环境变量，不应出现在连接器对象或前端配置里
+- 页数上限能避免误把试验空间或超大文档集一次性全部拉进来
+
+接口请求体里最重要的字段：
+
+- `page_ids`
+- `delete_missing`
+- `dry_run`
+- `max_pages`
+- `category`
+
+怎么拿 `page_ids`：
+
+- 从 Notion 页面 URL 中提取 page id
+- page id 本质上是 32 位十六进制字符串
+- 如果 URL 中带短横线，服务端会做标准化，但你仍然应该尽量传完整 page id
+
+为什么当前只传 `page_ids`，不支持“整个空间自动扫库”：
+
+- 企业环境里 Notion 权限边界复杂，自动全量扫描很容易越权或误同步无关资料
+- 明确指定页面更容易做试点、排障和责任归属
+
+#### 3. URL / 飞书 / 钉钉连接器要怎么配置
+
+这类连接器的关键不是只写 URL，而是把“认证信息”安全地从环境变量注入进去。
+
+推荐环境变量：
+
+```env
+FEISHU_DOC_AUTH=Bearer your-feishu-token
+DINGTALK_DOC_AUTH=Bearer your-dingtalk-token
+```
+
+这些值从哪来：
+
+- 来自你们企业内部开放平台应用、服务账号或网关签发的访问令牌
+- 具体是 `Bearer xxx`、`Bot xxx` 还是其他格式，取决于上游平台要求
+
+接口 `config` 里常见写法：
+
+```json
+{
+  "urls": ["https://example.feishu.cn/docx/xxxxx"],
+  "header_name": "Authorization",
+  "header_value_env": "FEISHU_DOC_AUTH",
+  "delete_missing": true,
+  "category": "feishu-policy"
+}
+```
+
+字段解释：
+
+- `header_name`
+  HTTP 请求头名称，最常见是 `Authorization`
+- `header_value_env`
+  不是密钥本身，而是“去读取哪个环境变量”的名字
+
+为什么要这样设计：
+
+- 连接器对象会被持久化、列出、审计；如果直接把 token 存进去，安全风险太高
+- 用 `header_value_env` 这种间接引用方式，既能支持不同平台，又不会把密钥写进数据库
+
+#### 4. SQL 连接器要怎么配置
+
+核心环境变量：
+
+- `REPORTING_DB_DSN` 或你自定义的任意 `dsn_env`
+
+推荐写法：
+
+```env
+REPORTING_DB_DSN=postgresql://user:password@host:5432/reporting
+```
+
+这个值从哪来：
+
+- 来自 DBA、数据平台同学或你们内部报表库的只读连接串
+- 强烈建议使用只读账号，不要使用有写权限的生产账号
+
+接口 `config` 里最重要的字段：
+
+- `dsn_env`
+- `query`
+- `id_column`
+- `title_column`
+- `text_column`
+- `updated_at_column`
+- `max_rows`
+
+推荐原则：
+
+- `dsn_env`
+  写环境变量名，不写真实连接串
+- `query`
+  只写单条 `SELECT`
+- `id_column`
+  选稳定主键，便于增量更新和去重
+- `text_column`
+  选真正给用户检索和问答用的正文列
+- `updated_at_column`
+  选最后更新时间列，便于后续增量同步
+- `max_rows`
+  第一次同步建议保守，从 `100` 到 `500` 开始
+
+为什么这样做：
+
+- SQL 连接器的目标是把结构化文本转成知识库文档，不是给用户直接开放数据库访问
+- 只允许 `SELECT` 是为了减少误操作风险
+- 使用稳定 `id_column` 和 `updated_at_column`，后续同步才不会反复制造重复文档
 
 ## 支持的文件与连接器
 
@@ -298,6 +849,53 @@ make down
 
 - 配置 `KB_LOCAL_CONNECTOR_ROOTS`
 
+怎么用：
+
+1. 先在后端 `.env` 里配置 `KB_LOCAL_CONNECTOR_ROOTS`
+2. 确保要同步的目录位于白名单根目录内
+3. 调用同步接口，把目录里的文档批量导入指定知识库
+
+最小示例：
+
+```bash
+curl -X POST http://localhost:8300/api/v1/kb/connectors/local-directory/sync \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "base_id": "<KB_ID>",
+    "source_path": "E:\\corp-docs\\hr",
+    "category": "hr-policy",
+    "recursive": true,
+    "delete_missing": true,
+    "dry_run": false,
+    "max_files": 200
+  }'
+```
+
+返回里重点看：
+
+- `counts.created`
+- `counts.updated`
+- `counts.deleted`
+- `ignored_files`
+
+如果你只是先预览会改动什么，把 `dry_run` 改成 `true`。
+
+配置字段说明：
+
+- `source_path`
+  真实业务目录，必须位于 `KB_LOCAL_CONNECTOR_ROOTS` 白名单之内
+- `recursive`
+  是否递归扫描子目录。目录层级深时通常开 `true`
+- `delete_missing`
+  当源目录文件被删除时，是否同步标记知识库文档为缺失
+- `dry_run`
+  只做预演，不真正写入文档
+- `max_files`
+  单次同步文件数上限，建议第一轮先保守
+- `category`
+  用于给导入文档打业务标签，便于后续筛选和治理
+
 #### 2. Notion 连接器
 
 接口：
@@ -319,6 +917,48 @@ make down
 
 - `KB_NOTION_CONNECTOR_ENABLED=true`
 - `KB_NOTION_API_TOKEN=<your-token>`
+
+怎么用：
+
+1. 在 Notion 创建一个 integration，并让目标页面授权给这个 integration
+2. 在后端 `.env` 里配置 `KB_NOTION_CONNECTOR_ENABLED=true`
+3. 配置 `KB_NOTION_API_TOKEN`
+4. 从页面 URL 中取出 page id，调用同步接口
+
+最小示例：
+
+```bash
+curl -X POST http://localhost:8300/api/v1/kb/connectors/notion/sync \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "base_id": "<KB_ID>",
+    "page_ids": ["xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"],
+    "category": "notion-docs",
+    "delete_missing": true,
+    "dry_run": false,
+    "max_pages": 20
+  }'
+```
+
+说明：
+
+- `page_ids` 只支持明确指定页面，不会自动扫描整个工作区
+- 同步时会把页面内容转成 UTF-8 文本，再进入统一 ingest 流程
+- 如果 Notion 页面后来更新，再次调用同步接口即可增量更新知识库文档
+
+配置字段说明：
+
+- `page_ids`
+  明确要同步的页面 ID 列表
+- `delete_missing`
+  当某些页面不再纳入本轮同步时，是否把知识库里的历史对应文档标记为移除
+- `dry_run`
+  先看本次同步计划，不真正写入
+- `max_pages`
+  本轮允许同步的最大页面数
+- `category`
+  给这批 Notion 文档统一打分类标签
 
 #### 3. 统一连接器注册表
 
@@ -344,6 +984,69 @@ make down
 - 支持立即执行和执行到期任务两种模式
 - 会保存最近运行结果、下次执行时间和历史运行记录
 
+怎么用：
+
+如果你不想每次都手工调用一次性同步接口，可以先创建一个连接器对象，再让系统按计划执行。
+
+创建本地目录连接器示例：
+
+```bash
+curl -X POST http://localhost:8300/api/v1/kb/connectors \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "base_id": "<KB_ID>",
+    "name": "HR Local Directory",
+    "connector_type": "local_directory",
+    "config": {
+      "source_path": "E:\\corp-docs\\hr",
+      "category": "hr-policy",
+      "recursive": true,
+      "delete_missing": true,
+      "max_files": 200
+    },
+    "schedule": {
+      "enabled": true,
+      "interval_minutes": 60
+    }
+  }'
+```
+
+手工触发一次：
+
+```bash
+curl -X POST http://localhost:8300/api/v1/kb/connectors/<CONNECTOR_ID>/sync \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": false}'
+```
+
+执行所有到期任务：
+
+```bash
+curl -X POST http://localhost:8300/api/v1/kb/connectors/run-due \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": false, "limit": 10}'
+```
+
+注册表里最重要的配置项：
+
+- `connector_type`
+  当前支持 `local_directory`、`notion`、`web_crawler`、`feishu_document`、`dingtalk_document`、`sql_query`
+- `config`
+  存业务配置，不存敏感密钥本体
+- `schedule.enabled`
+  是否进入定时执行
+- `schedule.interval_minutes`
+  调度间隔，最小 15 分钟
+
+推荐做法：
+
+- 先用一次性同步接口试跑成功
+- 再把稳定的同步方案沉淀成连接器注册表对象
+- 最后才打开调度执行
+
 #### 4. URL 类连接器（Web / 飞书 / 钉钉）
 
 当前后端已支持以下 `connector_type`：
@@ -358,6 +1061,50 @@ make down
 - 可选通过 `header_name + header_value_env` 注入鉴权头
 - 适合先接文档页、帮助中心、制度页、开放平台文档等可抓取页面
 
+创建飞书文档连接器示例：
+
+```bash
+curl -X POST http://localhost:8300/api/v1/kb/connectors \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "base_id": "<KB_ID>",
+    "name": "Feishu Policies",
+    "connector_type": "feishu_document",
+    "config": {
+      "urls": ["https://example.feishu.cn/docx/xxxxx"],
+      "category": "feishu-policy",
+      "delete_missing": true,
+      "header_name": "Authorization",
+      "header_value_env": "FEISHU_DOC_AUTH"
+    },
+    "schedule": {
+      "enabled": true,
+      "interval_minutes": 120
+    }
+  }'
+```
+
+配置字段说明：
+
+- `urls`
+  要抓取的页面 URL 列表，只支持 `http` 或 `https`
+- `header_name`
+  上游服务要求的鉴权头名称
+- `header_value_env`
+  存放鉴权头值的环境变量名
+- `delete_missing`
+  如果某些 URL 不再纳入同步范围，是否同步清理历史文档
+- `max_urls`
+  单次允许抓取的 URL 数量上限
+
+#### 飞书 / 钉钉接入建议
+
+- 先确认目标链接是否允许服务端访问，而不是只能在浏览器登录态里打开
+- 先手工请求一两个 URL，确认返回正文不是登录页或空壳页面
+- 优先用专用服务账号或应用 token，不要直接复用个人登录 cookie
+- 如果必须走鉴权头，统一把令牌放环境变量，不要把令牌写进连接器配置 JSON
+
 #### 5. SQL 数据连接器
 
 当前后端已支持 `connector_type=sql_query`。
@@ -368,6 +1115,56 @@ make down
 - 通过 `dsn_env` 读取部署环境中的数据库连接串
 - 按记录行生成文档并走统一知识库 ingest 流程
 - 适合报表表、制度表、FAQ 表等结构化文本同步
+
+创建 SQL 连接器示例：
+
+```bash
+curl -X POST http://localhost:8300/api/v1/kb/connectors \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "base_id": "<KB_ID>",
+    "name": "FAQ From Reporting DB",
+    "connector_type": "sql_query",
+    "config": {
+      "dsn_env": "REPORTING_DB_DSN",
+      "query": "select id, title, content, updated_at from faq_articles where status = ''published''",
+      "id_column": "id",
+      "title_column": "title",
+      "text_column": "content",
+      "updated_at_column": "updated_at",
+      "max_rows": 500
+    },
+    "schedule": {
+      "enabled": true,
+      "interval_minutes": 180
+    }
+  }'
+```
+
+配置字段说明：
+
+- `dsn_env`
+  数据库连接串所在环境变量名
+- `query`
+  单条 `SELECT` 查询
+- `id_column`
+  记录唯一标识列
+- `title_column`
+  文档标题来源列
+- `text_column`
+  文档正文来源列
+- `updated_at_column`
+  更新时间列，用于后续增量更新
+- `max_rows`
+  单次最多同步多少行
+
+接入建议：
+
+- 用只读账号
+- 先限制在小表或小结果集上验证
+- 先确认 `text_column` 的内容确实适合检索和问答
+- 对长文本字段先做清洗，避免把模板噪音、HTML 碎片或无意义日志直接导入知识库
 
 ## 系统架构
 
@@ -856,6 +1653,102 @@ docs/reference/         API 文档
 - 不默认承诺生产 SLA
 - Notion 连接器目前不是全量企业级同步方案
 - 当前权限模型还不是检索单元级 ACL 下沉
+
+## 常见问题
+
+### 1. 为什么文档已经上传了，但还不能问
+
+最常见原因是文档还没有完成 ingest。系统会按下面的状态推进：
+
+- `uploaded`
+- `parsing_fast`
+- `fast_index_ready`
+- `hybrid_ready`
+- `ready`
+
+只有进入 `ready`，检索和问答才最稳定。如果长时间卡住，优先检查：
+
+- `kb-worker` 是否正常运行
+- `kb-service` 的 `readyz`
+- MinIO 和 Qdrant 是否可用
+
+### 2. 为什么本地目录连接器提示目录不允许
+
+原因通常是 `source_path` 不在 `KB_LOCAL_CONNECTOR_ROOTS` 白名单里。
+
+你应该检查：
+
+- `.env` 是否正确配置了 `KB_LOCAL_CONNECTOR_ROOTS`
+- Windows 是否用了分号分隔多个目录
+- Linux / macOS 是否用了冒号分隔多个目录
+- 你传入的是某个具体业务目录，而不是一个越权目录或盘符根目录
+
+这样设计是为了避免服务进程任意扫描宿主机文件系统。
+
+### 3. 为什么 Notion 同步失败或拿不到内容
+
+最常见是下面几种情况：
+
+- `KB_NOTION_CONNECTOR_ENABLED` 没开
+- `KB_NOTION_API_TOKEN` 没配置
+- integration 没有被授权到目标页面
+- 传入的 `page_id` 不是有效的 32 位十六进制 ID
+
+建议排查顺序：
+
+1. 先确认 `.env` 配置
+2. 再确认 Notion integration 是否能访问这个页面
+3. 最后再检查 `page_ids` 是否取对
+
+### 4. 为什么 URL / 飞书 / 钉钉连接器同步下来的是空内容或登录页
+
+这通常不是同步接口本身失败，而是上游页面对未登录请求返回了空壳 HTML 或登录页。
+
+你应该先确认：
+
+- 目标 URL 能否被服务端直接访问
+- 是否需要 `Authorization` 或其他自定义头
+- `header_value_env` 指向的环境变量是否真的存在
+- 这个环境变量里的值格式是否符合上游平台要求
+
+### 5. 为什么 SQL 连接器不能直接写数据库地址到请求体里
+
+因为数据库连接串通常包含账号密码，直接写到连接器配置里会带来明显风险：
+
+- 容易被误记录到数据库
+- 容易出现在审计、导出或排障输出中
+- 不利于后续统一替换和轮换凭据
+
+所以设计上要求你在请求体里写 `dsn_env`，再由服务端去读取环境变量中的真实连接串。
+
+### 6. 为什么检索有命中，但回答仍然不理想
+
+这通常不是单一问题，常见原因包括：
+
+- chunk 切分质量不好
+- 文档里有 OCR 噪音
+- 同义表达较多，但原文写法和用户提问差异大
+- 命中的 chunk 对，但信息不完整
+
+推荐处理顺序：
+
+1. 先用 `POST /api/v1/kb/retrieve/debug` 看召回和 rerank
+2. 再查看对应 chunk 明细
+3. 必要时手工编辑、拆分、合并或禁用噪音 chunk
+4. 最后再重新问答验证
+
+### 7. 为什么建议先 `dry_run` 再正式同步
+
+因为企业数据同步一旦范围选错，最常见的问题不是“同步失败”，而是“同步了太多不该同步的东西”。
+
+`dry_run=true` 可以帮助你先看到：
+
+- 会新建多少文档
+- 会更新多少文档
+- 会删除多少文档
+- 有哪些文件被忽略
+
+这一步非常适合做首次试点和权限边界确认。
 
 ## 验证命令
 
