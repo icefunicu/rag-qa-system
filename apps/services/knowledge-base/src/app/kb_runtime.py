@@ -10,8 +10,11 @@ from .runtime import db, prepare_runtime, storage
 
 logger = setup_logging("kb-service")
 UPLOAD_PART_EXPIRES_SECONDS = int(os.getenv("UPLOAD_PART_EXPIRES_SECONDS", "3600"))
+VISUAL_ASSET_URL_EXPIRES_SECONDS = int(os.getenv("VISUAL_ASSET_URL_EXPIRES_SECONDS", "3600"))
 IDEMPOTENCY_TTL_HOURS = max(int(os.getenv("KB_IDEMPOTENCY_TTL_HOURS", "24")), 1)
 DEFAULT_INGEST_MAX_ATTEMPTS = max(int(os.getenv("KB_INGEST_MAX_ATTEMPTS", "5")), 1)
+KB_QUERY_MAX_IN_FLIGHT_GLOBAL = max(int(os.getenv("KB_QUERY_MAX_IN_FLIGHT_GLOBAL", "64")), 1)
+KB_QUERY_MAX_IN_FLIGHT_PER_USER = max(int(os.getenv("KB_QUERY_MAX_IN_FLIGHT_PER_USER", "8")), 1)
 KB_READ_PERMISSION = "kb.read"
 KB_WRITE_PERMISSION = "kb.write"
 KB_MANAGE_PERMISSION = "kb.manage"
@@ -47,6 +50,16 @@ KB_IDEMPOTENCY_TOTAL = Counter(
     "KB idempotency outcomes.",
     labelnames=("result", "scope"),
 )
+KB_BACKPRESSURE_TOTAL = Counter(
+    "rag_kb_backpressure_total",
+    "KB query backpressure rejections.",
+    labelnames=("scope", "endpoint"),
+)
+KB_SAFETY_EVENTS_TOTAL = Counter(
+    "rag_kb_safety_events_total",
+    "KB prompt safety events.",
+    labelnames=("risk_level", "action"),
+)
 
 
 __all__ = [
@@ -58,12 +71,17 @@ __all__ = [
     "KB_IDEMPOTENCY_TOTAL",
     "KB_INGEST_JOBS_GAUGE",
     "KB_MANAGE_PERMISSION",
+    "KB_BACKPRESSURE_TOTAL",
     "KB_READ_PERMISSION",
     "KB_RETRIEVE_LATENCY_MS",
     "KB_RETRIEVE_REQUESTS_TOTAL",
+    "KB_QUERY_MAX_IN_FLIGHT_GLOBAL",
+    "KB_QUERY_MAX_IN_FLIGHT_PER_USER",
+    "KB_SAFETY_EVENTS_TOTAL",
     "KB_UPLOAD_REQUESTS_TOTAL",
     "KB_WRITE_PERMISSION",
     "UPLOAD_PART_EXPIRES_SECONDS",
+    "VISUAL_ASSET_URL_EXPIRES_SECONDS",
     "db",
     "logger",
     "prepare_runtime",

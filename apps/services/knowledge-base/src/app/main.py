@@ -22,6 +22,7 @@ from .kb_query_routes import router as kb_query_router
 from .kb_runtime import db, logger, prepare_runtime, storage
 from .kb_system_routes import router as kb_system_router
 from .kb_upload_routes import router as kb_upload_router
+from .kb_visual_routes import router as kb_visual_router
 
 
 @asynccontextmanager
@@ -70,6 +71,7 @@ app.include_router(kb_upload_router)
 app.include_router(kb_legacy_upload_router)
 app.include_router(kb_ingest_router)
 app.include_router(kb_query_router)
+app.include_router(kb_visual_router)
 
 
 __all__ = ["_kb_readiness_checks", "app", "db", "storage"]

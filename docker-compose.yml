@@ -32,6 +32,19 @@ x-embedding-env: &embedding-env
   EMBEDDING_TIMEOUT_SECONDS: ${EMBEDDING_TIMEOUT_SECONDS:-60}
   EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-64}
 
+x-qdrant-env: &qdrant-env
+  QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+  QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+  QDRANT_COLLECTION: ${QDRANT_COLLECTION:-kb-evidence}
+  QDRANT_PREFER_GRPC: ${QDRANT_PREFER_GRPC:-false}
+  QDRANT_TIMEOUT_SECONDS: ${QDRANT_TIMEOUT_SECONDS:-10}
+  FASTEMBED_MODEL_NAME: ${FASTEMBED_MODEL_NAME:-BAAI/bge-small-zh-v1.5}
+  FASTEMBED_SPARSE_MODEL_NAME: ${FASTEMBED_SPARSE_MODEL_NAME:-Qdrant/bm25}
+  FASTEMBED_VECTOR_SIZE: ${FASTEMBED_VECTOR_SIZE:-512}
+  FASTEMBED_THREADS: ${FASTEMBED_THREADS:-4}
+  FASTEMBED_CACHE_DIR: ${FASTEMBED_CACHE_DIR:-/data/kb/fastembed-cache}
+  FASTEMBED_BATCH_SIZE: ${FASTEMBED_BATCH_SIZE:-64}
+
 x-llm-env: &llm-env
   LLM_ENABLED: ${LLM_ENABLED:-}
   AI_CHAT_ENABLED: ${AI_CHAT_ENABLED:-}
@@ -100,6 +113,15 @@ services:
       retries: 20
     logging: *default-logging
 
+  qdrant:
+    image: qdrant/qdrant:v1.13.3
+    ports:
+      - "${QDRANT_HOST_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_HOST_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    logging: *default-logging
+
   stack-init:
     profiles: ["init"]
     build:
@@ -107,7 +129,7 @@ services:
       dockerfile: apps/services/knowledge-base/Dockerfile
     command: ["python", "-m", "shared.stack_init"]
     environment:
-      <<: [*common-auth-env, *object-storage-env, *embedding-env]
+      <<: [*common-auth-env, *object-storage-env, *embedding-env, *qdrant-env]
       GATEWAY_DATABASE_DSN: ${GATEWAY_DATABASE_DSN:-postgresql://rag:rag@postgres:5432/gateway_app}
       KB_DATABASE_DSN: ${KB_DATABASE_DSN:-postgresql://rag:rag@postgres:5432/kb_app}
       KB_BLOB_ROOT: /data/kb
@@ -118,6 +140,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      qdrant:
+        condition: service_started
     restart: "no"
     logging: *default-logging
 
@@ -126,7 +150,7 @@ services:
       context: .
       dockerfile: apps/services/knowledge-base/Dockerfile
     environment:
-      <<: [*common-auth-env, *object-storage-env, *embedding-env]
+      <<: [*common-auth-env, *object-storage-env, *embedding-env, *qdrant-env]
       KB_DATABASE_DSN: ${KB_DATABASE_DSN:-postgresql://rag:rag@postgres:5432/kb_app}
       KB_BLOB_ROOT: /data/kb
     volumes:
@@ -138,6 +162,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      qdrant:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/healthz', timeout=3)"]
       interval: 5s
@@ -151,7 +177,7 @@ services:
       dockerfile: apps/services/knowledge-base/Dockerfile
     command: ["python", "-m", "app.worker"]
     environment:
-      <<: [*common-auth-env, *object-storage-env, *embedding-env]
+      <<: [*common-auth-env, *object-storage-env, *embedding-env, *qdrant-env]
       KB_DATABASE_DSN: ${KB_DATABASE_DSN:-postgresql://rag:rag@postgres:5432/kb_app}
       KB_BLOB_ROOT: /data/kb
     volumes:
@@ -189,3 +215,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  qdrant_data:

@@ -1,0 +1,10 @@
+[
+  {
+    "id": "refusal-1",
+    "category": "strict_refusal",
+    "question": "公司股票期权的归属周期是多少？",
+    "expected_sections": [],
+    "min_citations": 0,
+    "must_refuse_without_evidence": true
+  }
+]

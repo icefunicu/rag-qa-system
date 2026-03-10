@@ -17,6 +17,9 @@ try {
     Write-Info "Building initialization image..."
     Invoke-DockerCompose -Arguments @("--profile", "init", "build", "stack-init")
 
+    Write-Info "Starting required infrastructure services..."
+    Invoke-DockerCompose -Arguments @("up", "-d", "--remove-orphans", "postgres", "minio", "qdrant")
+
     Write-Info "Running explicit stack initialization..."
     Invoke-DockerCompose -Arguments @("--profile", "init", "run", "--rm", "stack-init")
     Write-Ok "Stack initialization completed"

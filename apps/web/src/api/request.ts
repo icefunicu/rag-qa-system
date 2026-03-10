@@ -19,6 +19,12 @@ export interface StreamRequestOptions {
   headers?: Record<string, string>;
 }
 
+export interface HandledRequestError extends Error {
+  handledByRequestLayer: true;
+  status?: number;
+  code?: string;
+}
+
 const request = axios.create({
   baseURL: '/api/v1',
   timeout: 60000
@@ -28,8 +34,10 @@ function getBackendError(responseData: unknown): string | undefined {
   if (!responseData || typeof responseData !== 'object') {
     return undefined;
   }
+
   const payload = responseData as Record<string, unknown>;
   const detail = payload.detail;
+
   if (typeof payload.error === 'string') {
     return payload.error;
   }
@@ -39,6 +47,30 @@ function getBackendError(responseData: unknown): string | undefined {
   if (typeof detail === 'string') {
     return detail;
   }
+
+  return undefined;
+}
+
+function getBackendErrorCode(responseData: unknown): string | undefined {
+  if (!responseData || typeof responseData !== 'object') {
+    return undefined;
+  }
+
+  const payload = responseData as Record<string, unknown>;
+  const candidates = [
+    payload.code,
+    payload.error_code,
+    payload.error,
+    payload.detail,
+    payload.message
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.toLowerCase().includes('too_many_inflight_requests')) {
+      return 'too_many_inflight_requests';
+    }
+  }
+
   return undefined;
 }
 
@@ -48,32 +80,41 @@ function handleUnauthorized() {
   router.push('/login');
 }
 
-function resolveErrorMessage(status?: number, backendError?: string): string {
+function resolveErrorMessage(status?: number, backendError?: string, responseData?: unknown): string {
+  const backendCode = getBackendErrorCode(responseData);
+
   if (status === 401) {
-    return '登录已失效，请重新登录';
+    return '登录已失效，请重新登录。';
   }
   if (status === 400) {
-    return String(backendError || '请求参数错误，请检查输入后重试');
+    return String(backendError || '请求参数错误，请检查输入后重试。');
   }
   if (status === 403) {
-    return String(backendError || '权限不足');
+    return String(backendError || '当前操作无权限执行。');
   }
   if (status === 404) {
-    return String(backendError || '资源不存在，请刷新页面后重试');
+    return String(backendError || '请求的资源不存在，请刷新页面后重试。');
   }
   if (status === 405) {
-    return '请求方法不受支持，请检查前后端接口配置';
+    return '请求方法不被支持，请检查前后端接口配置。';
   }
   if (status === 409) {
-    return String(backendError || '请求冲突，可能是重复的幂等提交');
+    return String(backendError || '请求发生冲突，可能是重复提交，请稍后重试。');
+  }
+  if (status === 429 && backendCode === 'too_many_inflight_requests') {
+    return '当前排队中的问答请求过多，请等待上一条回答完成后再试。';
+  }
+  if (status === 429) {
+    return String(backendError || '当前请求过于频繁，请稍后再试。');
   }
   if (status === 503) {
-    return '服务暂时不可用，请稍后重试';
+    return '服务暂时不可用，请稍后重试。';
   }
   if (backendError) {
     return backendError;
   }
-  return '请求失败';
+
+  return '请求失败，请稍后重试。';
 }
 
 function notifyRequestError(status?: number, responseData?: unknown) {
@@ -81,7 +122,16 @@ function notifyRequestError(status?: number, responseData?: unknown) {
   if (status === 401) {
     handleUnauthorized();
   }
-  ElMessage.error(resolveErrorMessage(status, backendError));
+  ElMessage.error(resolveErrorMessage(status, backendError, responseData));
+}
+
+function createHandledRequestError(message: string, status?: number, code?: string): HandledRequestError {
+  const error = new Error(message) as HandledRequestError;
+  error.name = 'HandledRequestError';
+  error.handledByRequestLayer = true;
+  error.status = status;
+  error.code = code;
+  return error;
 }
 
 request.interceptors.request.use(
@@ -179,8 +229,14 @@ export async function streamRequest(path: string, body: unknown, options: Stream
 
   if (!response.ok) {
     const payload = await parseErrorPayload(response);
+    const backendError = getBackendError(payload);
+    const backendCode = getBackendErrorCode(payload);
     notifyRequestError(response.status, payload);
-    throw new Error(resolveErrorMessage(response.status, getBackendError(payload)));
+    throw createHandledRequestError(
+      resolveErrorMessage(response.status, backendError, payload),
+      response.status,
+      backendCode
+    );
   }
 
   if (!response.body || !options.onEvent) {
@@ -217,6 +273,10 @@ export async function streamRequest(path: string, body: unknown, options: Stream
 
 export function isAbortRequestError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
+}
+
+export function isHandledRequestError(error: unknown): error is HandledRequestError {
+  return error instanceof Error && (error as Partial<HandledRequestError>).handledByRequestLayer === true;
 }
 
 export default request;

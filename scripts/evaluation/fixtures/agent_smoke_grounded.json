@@ -1,0 +1,10 @@
+[
+  {
+    "id": "grounded-1",
+    "category": "grounded_single",
+    "question": "报销超过 1000 RMB 需要哪些审批？",
+    "expected_sections": ["Approval Threshold"],
+    "min_citations": 1,
+    "must_refuse_without_evidence": false
+  }
+]

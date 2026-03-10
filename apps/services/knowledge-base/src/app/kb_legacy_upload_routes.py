@@ -12,6 +12,7 @@ from .db import to_json
 from .kb_api_support import audit_event, require_kb_permission
 from .kb_resource_store import ensure_base_exists
 from .kb_runtime import KB_WRITE_PERMISSION, db, storage
+from .kb_schemas import ALLOWED_KB_FILE_TYPES
 
 
 router = APIRouter()
@@ -35,7 +36,7 @@ def upload_documents(
         raw = upload.file.read()
         document_id = str(uuid4())
         file_type = (upload.filename or "").split(".")[-1].lower()
-        if file_type not in {"txt", "pdf", "docx"}:
+        if file_type not in ALLOWED_KB_FILE_TYPES:
             raise_api_error(400, "unsupported_file_type", f"unsupported kb file type: {file_type}")
         storage_key = storage.build_storage_key(service="kb-legacy", document_id=document_id, file_name=upload.filename or "source.bin")
         content_hash = hashlib.sha256(raw).hexdigest()

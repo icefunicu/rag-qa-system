@@ -44,7 +44,7 @@ try {
     }
 
     Write-Info "Starting infrastructure services..."
-    Invoke-DockerCompose -Arguments @("up", "-d", "--remove-orphans", "postgres", "minio")
+    Invoke-DockerCompose -Arguments @("up", "-d", "--remove-orphans", "postgres", "minio", "qdrant")
 
     Write-Info "Applying explicit stack initialization..."
     Invoke-DockerCompose -Arguments @("--profile", "init", "run", "--rm", "stack-init")

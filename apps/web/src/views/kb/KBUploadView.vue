@@ -53,12 +53,12 @@
           >
             <el-icon :size="32"><UploadFilled /></el-icon>
             <span>点击或拖拽文件</span>
-            <span class="dropzone-hint">TXT / PDF / DOCX</span>
+            <span class="dropzone-hint">TXT / PDF / DOCX / PNG / JPG / JPEG</span>
           </div>
           <input
             ref="fileInputRef"
             type="file"
-            accept=".txt,.pdf,.docx"
+            accept=".txt,.pdf,.docx,.png,.jpg,.jpeg"
             multiple
             class="hidden-input"
             @change="handleFileChange"
@@ -287,7 +287,7 @@ const handleDrop = (e: DragEvent) => {
 const addFiles = (files: File[]) => {
   const valid = files.filter((f) => {
     const ext = f.name.split('.').pop()?.toLowerCase();
-    return ext === 'txt' || ext === 'pdf' || ext === 'docx';
+    return ['txt', 'pdf', 'docx', 'png', 'jpg', 'jpeg'].includes(String(ext || ''));
   });
   if (valid.length < files.length) ElMessage.warning('已过滤不支持格式');
   selectedFiles.value = [...selectedFiles.value, ...valid];

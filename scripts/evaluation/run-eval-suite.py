@@ -64,6 +64,7 @@ def main() -> int:
             scope_mode=str(job.get("scope_mode", "single")),
             corpus_ids=list(job.get("corpus_ids", [])),
             document_ids=list(job.get("document_ids", [])),
+            execution_mode=str(job.get("execution_mode", "grounded")),
         )
         results.append({"name": str(job.get("name") or Path(str(job["eval_file"])).stem), "report": report})
 

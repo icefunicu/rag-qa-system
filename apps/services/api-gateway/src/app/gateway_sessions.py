@@ -35,6 +35,7 @@ def serialize_chat_message(row: dict[str, Any]) -> dict[str, Any]:
         "question": str(row.get("question") or ""),
         "answer": str(row.get("answer") or ""),
         "answer_mode": str(row.get("answer_mode") or ""),
+        "execution_mode": str((row.get("scope_snapshot_json") or {}).get("execution_mode") or "grounded"),
         "evidence_status": str(row.get("evidence_status") or ""),
         "grounding_score": float(row.get("grounding_score") or 0.0),
         "refusal_reason": str(row.get("refusal_reason") or ""),

@@ -4,11 +4,16 @@ import asyncio
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+from langchain_core.documents import Document
+from pydantic import ValidationError
 
 from shared import auth as auth_module
 from shared import embeddings as embeddings_module
 from shared.embeddings import EmbeddingSettings, clear_query_embedding_cache, embed_query_text
 from shared.idempotency import build_request_hash, normalize_idempotency_key
+from shared.qdrant_store import qdrant_point_id
 from shared.stack_init import _load_migration_files, _migration_checksum, _select_pending_migrations
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -93,7 +98,18 @@ def _load_gateway_main(monkeypatch):
 def _load_gateway_module(module_name: str):
     _prioritize_sys_path(GATEWAY_SRC)
 
-    for name in ("app.main", "app.gateway_answering", "app.gateway_scope", "app.ai_client", "app.db", "app"):
+    for name in (
+        module_name,
+        "app.main",
+        "app.gateway_agent",
+        "app.gateway_answering",
+        "app.gateway_chat_routes",
+        "app.gateway_chat_service",
+        "app.gateway_scope",
+        "app.ai_client",
+        "app.db",
+        "app",
+    ):
         sys.modules.pop(name, None)
 
     module = importlib.import_module(module_name)
@@ -103,7 +119,18 @@ def _load_gateway_module(module_name: str):
 def _load_kb_module(module_name: str):
     _prioritize_sys_path(KB_SRC)
 
-    for name in ("app.main", "app.retrieve", "app.runtime", "app.db", "app.query", "app"):
+    for name in (
+        module_name,
+        "app.main",
+        "app.kb_query_helpers",
+        "app.retrieve",
+        "app.runtime",
+        "app.db",
+        "app.query",
+        "app.worker",
+        "app.vector_store",
+        "app",
+    ):
         sys.modules.pop(name, None)
 
     module = importlib.import_module(module_name)
@@ -303,9 +330,10 @@ def test_generate_grounded_answer_uses_general_llm_path_for_common_knowledge(mon
         common_knowledge_history_messages = 1
         common_knowledge_history_chars = 24
 
-    async def fake_create_llm_completion(*, settings, messages, model, temperature, max_tokens):
+    async def fake_create_llm_completion(*, settings, prompt, inputs, model, temperature, max_tokens):
         captured["settings"] = settings
-        captured["messages"] = messages
+        captured["prompt"] = prompt
+        captured["inputs"] = inputs
         captured["model"] = model
         captured["temperature"] = temperature
         captured["max_tokens"] = max_tokens
@@ -331,12 +359,14 @@ def test_generate_grounded_answer_uses_general_llm_path_for_common_knowledge(mon
         )
     )
 
-    messages = captured["messages"]
-    assert isinstance(messages, list)
-    assert any("Why does the sun shine?" in str(item.get("content") or "") for item in messages if isinstance(item, dict))
-    assert not any("outdated history" in str(item.get("content") or "") for item in messages if isinstance(item, dict))
-    assert any("This assistant reply is" in str(item.get("content") or "") for item in messages if isinstance(item, dict))
-    assert not any("history truncation limit" in str(item.get("content") or "") for item in messages if isinstance(item, dict))
+    prompt = captured["prompt"]
+    inputs = captured["inputs"]
+    messages = prompt.format_messages(**inputs)
+    rendered = [str(getattr(item, "content", "")) for item in messages]
+    assert any("Why does the sun shine?" in item for item in rendered)
+    assert not any("outdated history" in item for item in rendered)
+    assert any("This assistant reply is" in item for item in rendered)
+    assert not any("history truncation limit" in item for item in rendered)
     assert captured["model"] == "mock-common-model"
     assert captured["temperature"] == 0.4
     assert captured["max_tokens"] == 256
@@ -465,6 +495,108 @@ def test_default_scope_disables_common_knowledge_fallback() -> None:
     scope = gateway_scope.default_scope()
 
     assert scope["allow_common_knowledge"] is False
+    assert scope["execution_mode"] == "grounded"
+
+
+def test_prepare_chat_message_uses_agent_execution_mode(monkeypatch) -> None:
+    gateway_chat_service = _load_gateway_module("app.gateway_chat_service")
+    user = auth_module.AuthUser(user_id="u-1", email="member@local", role="member")
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent_search(**kwargs):
+        captured.update(kwargs)
+        return (
+            [{"unit_id": "chunk-1", "evidence_path": {"final_score": 0.87}}],
+            "expense approval flow",
+            {"aggregate": {"selected_candidates": 1, "execution_mode": "agent"}},
+        )
+
+    async def fail_retrieve_scope_evidence(**kwargs):
+        raise AssertionError("grounded retriever should be skipped in agent mode")
+
+    async def fake_resolve_scope_snapshot(current_user, scope_payload):
+        assert current_user == user
+        return {
+            "mode": "single",
+            "corpus_ids": ["kb:base-1"],
+            "document_ids": [],
+            "documents_by_corpus": {},
+            "allow_common_knowledge": False,
+        }
+
+    monkeypatch.setattr(gateway_chat_service, "run_agent_search", fake_run_agent_search)
+
+    prepared = asyncio.run(
+        gateway_chat_service.prepare_chat_message(
+            session_id="session-1",
+            payload=SimpleNamespace(question="What is the expense approval flow?", scope=None, execution_mode=None),
+            user=user,
+            load_session_fn=lambda sid, actor: {"id": sid, "scope_json": {"execution_mode": "agent"}},
+            default_scope_fn=lambda: {"mode": "all", "execution_mode": "grounded"},
+            resolve_scope_snapshot_fn=fake_resolve_scope_snapshot,
+            recent_history_messages_fn=lambda sid, actor, limit=8: [],
+            retrieve_scope_evidence_fn=fail_retrieve_scope_evidence,
+            fetch_corpus_documents_fn=lambda *args, **kwargs: [],
+        )
+    )
+
+    assert prepared["execution_mode"] == "agent"
+    assert prepared["scope_snapshot"]["execution_mode"] == "agent"
+    assert prepared["contextualized_question"] == "expense approval flow"
+    assert prepared["retrieval_meta"]["aggregate"]["execution_mode"] == "agent"
+    assert captured["scope_snapshot"]["execution_mode"] == "agent"
+
+
+def test_run_agent_search_degrades_to_grounded_when_tool_calling_fails(monkeypatch) -> None:
+    gateway_agent = _load_gateway_module("app.gateway_agent")
+    user = auth_module.AuthUser(user_id="u-1", email="member@local", role="member")
+
+    class _Settings:
+        configured = True
+        model = "mock-model"
+        default_max_tokens = 512
+
+    class _BrokenModel:
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages):
+            raise RuntimeError("quota exhausted")
+
+    async def fake_retrieve_scope_evidence_fn(**kwargs):
+        return (
+            [{"unit_id": "chunk-1", "evidence_path": {"final_score": 0.91}}],
+            "expense approval flow",
+            {"aggregate": {"selected_candidates": 1}, "services": []},
+        )
+
+    monkeypatch.setattr(gateway_agent, "load_llm_settings", lambda: _Settings())
+    monkeypatch.setattr(gateway_agent, "build_chat_model", lambda **kwargs: _BrokenModel())
+
+    evidence, contextualized_question, retrieval_meta = asyncio.run(
+        gateway_agent.run_agent_search(
+            user=user,
+            scope_snapshot={
+                "mode": "single",
+                "corpus_ids": ["kb:base-1"],
+                "document_ids": [],
+                "documents_by_corpus": {},
+                "allow_common_knowledge": False,
+                "execution_mode": "agent",
+            },
+            question="What is the expense approval flow?",
+            history=[],
+            retrieve_scope_evidence_fn=fake_retrieve_scope_evidence_fn,
+            fetch_corpus_documents_fn=lambda *args, **kwargs: [],
+            kb_service_url="http://kb-service:8200",
+        )
+    )
+
+    assert len(evidence) == 1
+    assert contextualized_question == "expense approval flow"
+    assert retrieval_meta["aggregate"]["execution_mode"] == "agent"
+    assert retrieval_meta["aggregate"]["agent_fallback"] is True
+    assert retrieval_meta["agent"]["fallback"] is True
 
 
 def test_common_knowledge_answers_are_prefixed_with_disclaimer() -> None:
@@ -476,19 +608,24 @@ def test_common_knowledge_answers_are_prefixed_with_disclaimer() -> None:
     assert "nuclear fusion" in answer
 
 
-def test_query_vector_literal_degrades_when_embedding_fails(monkeypatch) -> None:
-    kb_retrieve = _load_kb_module("app.retrieve")
+def test_search_vector_evidence_degrades_when_qdrant_query_fails(monkeypatch) -> None:
+    kb_vector_store = _load_kb_module("app.vector_store")
 
-    def fail_embed_query_text(query: str):
-        raise RuntimeError("embedding provider unavailable")
+    def fail_build_vector_retriever(*, base_id, document_ids, limit):
+        raise RuntimeError("qdrant unavailable")
 
-    monkeypatch.setattr(kb_retrieve, "embed_query_text", fail_embed_query_text)
+    monkeypatch.setattr(kb_vector_store, "build_vector_retriever", fail_build_vector_retriever)
 
-    vector_literal, degraded_signals, warnings = kb_retrieve._build_query_vector_literal("expense approval flow")
+    evidence, degraded_signals, warnings = kb_vector_store.search_vector_evidence(
+        base_id="base-1",
+        question="expense approval flow",
+        document_ids=["doc-1"],
+        limit=4,
+    )
 
-    assert vector_literal == ""
+    assert evidence == []
     assert degraded_signals == ["vector"]
-    assert warnings == ["vector retrieval disabled because query embedding generation failed"]
+    assert warnings == ["vector retrieval disabled because qdrant query execution failed"]
 
 
 def test_gateway_readiness_checks_degrade_llm_without_failing(monkeypatch) -> None:
@@ -574,11 +711,13 @@ def test_kb_readiness_checks_require_storage(monkeypatch) -> None:
 
     monkeypatch.setattr(kb_main.db, "connect", lambda: _Connection())
     monkeypatch.setattr(kb_main.storage, "check_bucket_access", lambda: (_ for _ in ()).throw(RuntimeError("bucket missing")))
+    monkeypatch.setitem(kb_main._kb_readiness_checks.__globals__, "check_vector_store", lambda: {"collection": "kb-evidence"})
 
     checks = kb_main._kb_readiness_checks()
 
     assert checks["database"]["status"] == "ok"
     assert checks["object_storage"]["status"] == "failed"
+    assert checks["vector_store"]["status"] == "ok"
 
 
 def test_auth_configuration_allows_default_credentials_in_local_runtime(monkeypatch) -> None:
@@ -670,11 +809,130 @@ def test_idempotency_hash_is_stable_for_equivalent_payloads() -> None:
     assert normalize_idempotency_key("  key-123 \n") == "key-123"
 
 
+def test_qdrant_point_id_is_stable_uuid() -> None:
+    left = qdrant_point_id(unit_type="section", unit_id="11111111-1111-1111-1111-111111111111")
+    right = qdrant_point_id(unit_type="section", unit_id="11111111-1111-1111-1111-111111111111")
+    other = qdrant_point_id(unit_type="chunk", unit_id="11111111-1111-1111-1111-111111111111")
+
+    assert left == right
+    assert other != left
+    assert len(left) == 36
+
+
 def test_worker_retry_delay_uses_bounded_backoff() -> None:
     kb_worker = _load_kb_module("app.worker")
 
     assert kb_worker._retry_delay_seconds(1) == 5
     assert kb_worker._retry_delay_seconds(2) == 15
     assert kb_worker._retry_delay_seconds(9) == 300
+
+
+def test_create_upload_request_accepts_image_types() -> None:
+    _prioritize_sys_path(KB_SRC)
+    kb_schemas = importlib.import_module("app.kb_schemas")
+
+    payload = kb_schemas.CreateUploadRequest(
+        base_id="base-1",
+        file_name="evidence.png",
+        file_type=".PNG",
+        size_bytes=12,
+        category="images",
+    )
+
+    assert payload.file_type == "png"
+
+
+def test_create_upload_request_rejects_unknown_type() -> None:
+    _prioritize_sys_path(KB_SRC)
+    kb_schemas = importlib.import_module("app.kb_schemas")
+
+    try:
+        kb_schemas.CreateUploadRequest(
+            base_id="base-1",
+            file_name="sheet.xlsx",
+            file_type="xlsx",
+            size_bytes=12,
+            category="images",
+        )
+    except ValidationError as exc:
+        assert "unsupported kb file type" in str(exc)
+    else:
+        raise AssertionError("expected invalid file type to raise ValidationError")
+
+
+def test_extract_visual_assets_supports_standalone_png(tmp_path: Path) -> None:
+    _prioritize_sys_path(KB_SRC)
+    kb_vision = importlib.import_module("app.vision")
+    image_path = tmp_path / "sample.png"
+    from PIL import Image
+
+    Image.new("RGB", (32, 16), color=(255, 255, 255)).save(image_path)
+
+    assets = kb_vision.extract_visual_assets(image_path, "png", max_assets=8)
+
+    assert len(assets) == 1
+    assert assets[0].source_kind == "standalone"
+    assert assets[0].page_number == 1
+    assert assets[0].mime_type in {"image/png", "image/jpeg"}
+
+
+def test_worker_merge_ingest_stats_combines_visual_counts() -> None:
+    kb_worker = _load_kb_module("app.worker")
+
+    merged = kb_worker._merge_ingest_stats(
+        {"section_count": 2, "chunk_count": 3, "section_preview": ["a"]},
+        {
+            "visual_asset_count": 4,
+            "visual_ocr_section_count": 1,
+            "visual_ocr_chunk_count": 2,
+            "visual_provider": "local-http",
+            "section_preview": ["a", "b"],
+            "visual_ms": 12.5,
+        },
+    )
+
+    assert merged["section_count"] == 3
+    assert merged["chunk_count"] == 5
+    assert merged["visual_asset_count"] == 4
+    assert merged["visual_provider"] == "local-http"
+
+
+def test_retrieve_merge_documents_include_visual_metadata() -> None:
+    kb_retrieve = _load_kb_module("app.retrieve")
+    results: dict[str, object] = {}
+    signal_lists: dict[str, list[str]] = {}
+
+    kb_retrieve._merge_documents(
+        results,
+        signal_lists,
+        [
+            Document(
+                page_content="approval amount limit",
+                metadata={
+                    "unit_id": "chunk-1",
+                    "document_id": "doc-1",
+                    "document_title": "Policy",
+                    "section_title": "Page 3 screenshot 1",
+                    "source_kind": "visual_ocr",
+                    "page_number": 3,
+                    "asset_id": "asset-1",
+                    "thumbnail_url": "/api/v1/kb/visual-assets/asset-1/thumbnail",
+                    "char_range": "0-20",
+                    "quote": "approval amount limit",
+                    "raw_text": "approval amount limit",
+                    "base_id": "base-1",
+                    "signal_scores": {"fts": 0.88},
+                    "evidence_path": {"fts_rank": 1},
+                },
+            )
+        ],
+        "fts",
+    )
+
+    item = results["chunk-1"]
+    assert item.evidence_kind == "visual_ocr"
+    assert item.page_number == 3
+    assert item.asset_id == "asset-1"
+    assert item.thumbnail_url == "/api/v1/kb/visual-assets/asset-1/thumbnail"
 
 

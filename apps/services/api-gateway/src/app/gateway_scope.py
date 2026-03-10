@@ -21,7 +21,15 @@ def default_scope() -> dict[str, Any]:
         "document_ids": [],
         "documents_by_corpus": {},
         "allow_common_knowledge": False,
+        "execution_mode": "grounded",
     }
+
+
+def normalize_execution_mode(value: str | None, *, default: str = "grounded") -> str:
+    normalized = str(value or "").strip().lower() or default
+    if normalized not in {"grounded", "agent"}:
+        raise_api_error(400, "unsupported_execution_mode", f"unsupported execution mode: {normalized}")
+    return normalized
 
 
 def normalize_scope_payload(payload: ChatScopePayload | None) -> dict[str, Any]:
@@ -41,6 +49,7 @@ def normalize_scope_payload(payload: ChatScopePayload | None) -> dict[str, Any]:
         "corpus_ids": list(dict.fromkeys(corpus_ids)),
         "document_ids": list(dict.fromkeys(document_ids)),
         "allow_common_knowledge": bool(payload.allow_common_knowledge),
+        "execution_mode": "grounded",
     }
 
 
@@ -138,4 +147,5 @@ async def resolve_scope_snapshot(
         "document_ids": list(dict.fromkeys(selected_documents)),
         "documents_by_corpus": {corpus_id: list(dict.fromkeys(ids)) for corpus_id, ids in documents_by_corpus.items() if ids},
         "allow_common_knowledge": bool(scope["allow_common_knowledge"]),
+        "execution_mode": "grounded",
     }

@@ -31,31 +31,62 @@
           <el-tag :type="statusMeta(document.status).type" size="small" effect="plain">
             {{ statusMeta(document.status).label }}
           </el-tag>
+          <el-tag v-if="document.stats_json?.visual_asset_count" type="success" size="small" effect="plain">
+            截图 {{ document.stats_json.visual_asset_count }} 张
+          </el-tag>
         </div>
 
         <el-collapse v-model="activeCollapse">
           <el-collapse-item name="chunks" title="知识切片概览">
             <template #title>
               <span>知识切片概览</span>
-              <el-tag size="small" type="info" style="margin-left: 8px">{{ sectionPreview.length }} 个</el-tag>
+              <el-tag size="small" type="info" style="margin-left: 8px">{{ sectionPreview.length }} 项</el-tag>
             </template>
             <EnhancedEmpty
               v-if="!sectionPreview.length"
               variant="document"
-              title="无切片"
-              description="文档切片将在此展示"
+              title="暂无切片"
+              description="文档切片完成后会在这里展示"
               class="chunk-empty"
             />
             <div v-else class="chunk-grid">
-              <div
-                v-for="(item, index) in sectionPreview"
-                :key="index"
-                class="chunk-node"
-              >
+              <div v-for="(item, index) in sectionPreview" :key="index" class="chunk-node">
                 <span class="chunk-index">#{{ Number(index) + 1 }}</span>
                 <span class="chunk-text">{{ String(item).slice(0, 120) }}{{ String(item).length > 120 ? '…' : '' }}</span>
                 <span class="chunk-meta">{{ String(item).length }} 字符</span>
               </div>
+            </div>
+          </el-collapse-item>
+
+          <el-collapse-item name="visuals" title="截图资产">
+            <template #title>
+              <span>截图资产</span>
+              <el-tag size="small" type="success" style="margin-left: 8px">{{ visualAssets.length }} 张</el-tag>
+            </template>
+            <EnhancedEmpty
+              v-if="!visualAssets.length"
+              variant="document"
+              title="暂无截图资产"
+              description="视觉增强完成后会在这里展示文档里的截图"
+              class="chunk-empty"
+            />
+            <div v-else class="visual-grid">
+              <article v-for="asset in visualAssets" :key="asset.asset_id" class="visual-card">
+                <div class="visual-thumb-wrap">
+                  <img
+                    v-if="asset.thumbnail_url"
+                    :src="asset.thumbnail_url"
+                    :alt="asset.file_name || 'visual asset'"
+                    class="visual-thumb"
+                  />
+                  <div v-else class="visual-thumb visual-thumb--empty">无预览</div>
+                </div>
+                <div class="visual-meta">
+                  <strong>{{ asset.file_name || `截图 ${asset.asset_index || ''}` }}</strong>
+                  <span>{{ asset.page_number ? `第 ${asset.page_number} 页` : '内嵌图片' }}</span>
+                  <span>{{ asset.status || '-' }}</span>
+                </div>
+              </article>
             </div>
           </el-collapse-item>
 
@@ -102,6 +133,7 @@ import {
   deleteKBDocument,
   getKBDocument,
   getKBDocumentEvents,
+  getKBDocumentVisualAssets,
   retryKBIngestJob,
   updateKBDocument
 } from '@/api/kb';
@@ -114,9 +146,10 @@ const authStore = useAuthStore();
 
 const document = ref<any | null>(null);
 const events = ref<any[]>([]);
+const visualAssets = ref<any[]>([]);
 const retryingJob = ref(false);
 const editDrawerVisible = ref(false);
-const activeCollapse = ref<string[]>([]);
+const activeCollapse = ref<string[]>(['chunks', 'visuals']);
 
 const documentForm = reactive({
   file_name: '',
@@ -133,10 +166,14 @@ const syncDocumentForm = () => {
 };
 
 const load = async () => {
-  const id = String(route.params.id);
+  const id = String(route.params.id || '');
   document.value = await getKBDocument(id);
-  const result: any = await getKBDocumentEvents(id);
-  events.value = result.items || [];
+  const [eventsResult, visualResult]: any[] = await Promise.all([
+    getKBDocumentEvents(id),
+    getKBDocumentVisualAssets(id)
+  ]);
+  events.value = eventsResult.items || [];
+  visualAssets.value = visualResult.items || [];
   syncDocumentForm();
 };
 
@@ -283,5 +320,51 @@ onMounted(() => void load());
 
 .chunk-empty {
   padding: 32px 20px !important;
+}
+
+.visual-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.visual-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-panel);
+}
+
+.visual-thumb-wrap {
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--bg-panel-muted);
+  border: 1px solid var(--border-color);
+}
+
+.visual-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.visual-thumb--empty {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.visual-meta {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.visual-meta strong {
+  color: var(--text-primary);
 }
 </style>

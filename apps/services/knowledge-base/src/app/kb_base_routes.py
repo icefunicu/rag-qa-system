@@ -15,11 +15,14 @@ from .kb_resource_store import (
     load_base,
     load_document,
     load_latest_ingest_job_for_document,
+    list_document_visual_assets,
+    list_visual_storage_keys_for_documents,
     serialize_ingest_job,
 )
 from .kb_runtime import KB_READ_PERMISSION, KB_WRITE_PERMISSION, db
 from .kb_schemas import CreateBaseRequest, UpdateBaseRequest, UpdateDocumentRequest
 from .kb_upload_store import cleanup_deleted_resources, list_base_upload_sessions, list_document_upload_sessions
+from .vector_store import delete_base_vectors, delete_document_vectors
 
 
 router = APIRouter()
@@ -120,12 +123,14 @@ def delete_base(base_id: str, request: Request, user: CurrentUser) -> dict[str, 
         with conn.cursor() as cur:
             documents = fetch_base_documents(base_id, user=user, cur=cur)
             upload_sessions = list_base_upload_sessions(base_id, user=user, cur=cur)
+            visual_storage_keys = list_visual_storage_keys_for_documents([str(item["id"]) for item in documents], cur=cur)
             cur.execute("DELETE FROM kb_bases WHERE id = %s", (base_id,))
         conn.commit()
     cleanup_deleted_resources(
         upload_sessions=upload_sessions,
-        storage_keys=[str(item.get("storage_key") or "") for item in documents],
+        storage_keys=[str(item.get("storage_key") or "") for item in documents] + visual_storage_keys,
     )
+    delete_base_vectors(base_id)
     audit_event(
         action="kb.base.delete",
         outcome="success",
@@ -206,11 +211,16 @@ def delete_document(document_id: str, request: Request, user: CurrentUser) -> di
     with db.connect() as conn:
         with conn.cursor() as cur:
             upload_sessions = list_document_upload_sessions(document_id, document.get("upload_session_id"), user=user, cur=cur)
+            visual_storage_keys = list_visual_storage_keys_for_documents([document_id], cur=cur)
             for session in upload_sessions:
                 cur.execute("DELETE FROM kb_upload_sessions WHERE id = %s", (session["id"],))
             cur.execute("DELETE FROM kb_documents WHERE id = %s", (document_id,))
         conn.commit()
-    cleanup_deleted_resources(upload_sessions=upload_sessions, storage_keys=[str(document.get("storage_key") or "")])
+    cleanup_deleted_resources(
+        upload_sessions=upload_sessions,
+        storage_keys=[str(document.get("storage_key") or "")] + visual_storage_keys,
+    )
+    delete_document_vectors(document_id)
     audit_event(
         action="kb.document.delete",
         outcome="success",
@@ -240,3 +250,9 @@ def get_document_events(document_id: str, request: Request, user: CurrentUser) -
             )
             rows = cur.fetchall()
     return {"items": rows}
+
+
+@router.get("/api/v1/kb/documents/{document_id}/visual-assets")
+def get_document_visual_assets(document_id: str, request: Request, user: CurrentUser) -> dict[str, Any]:
+    require_kb_permission(request, user, KB_READ_PERMISSION, action="kb.document.visual_assets", resource_type="document", resource_id=document_id)
+    return {"items": list_document_visual_assets(document_id, user=user)}

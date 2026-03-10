@@ -33,6 +33,16 @@ GATEWAY_RETRIEVAL_FANOUT_WALL_MS = Histogram(
     "Gateway retrieval fanout wall time in milliseconds.",
     buckets=(10, 25, 50, 100, 250, 500, 1000, 2000, 5000),
 )
+GATEWAY_BACKPRESSURE_TOTAL = Counter(
+    "rag_gateway_backpressure_total",
+    "Gateway backpressure rejections.",
+    labelnames=("scope", "endpoint"),
+)
+GATEWAY_SAFETY_EVENTS_TOTAL = Counter(
+    "rag_gateway_safety_events_total",
+    "Gateway prompt safety events.",
+    labelnames=("risk_level", "action"),
+)
 GATEWAY_LLM_TOKENS_TOTAL = Counter(
     "rag_gateway_llm_tokens_total",
     "Gateway LLM token usage.",

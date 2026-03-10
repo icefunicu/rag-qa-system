@@ -140,11 +140,20 @@
               <el-tag effect="plain">证据综合分 {{ Number(result.grounding_score || 0).toFixed(2) }}</el-tag>
             </div>
 
+            <el-alert
+              v-if="resultSafetyNotice"
+              :title="resultSafetyNotice.title"
+              :description="resultSafetyNotice.message"
+              :type="resultSafetyNotice.level === 'error' ? 'error' : 'warning'"
+              :closable="false"
+              show-icon
+            />
+
             <div class="answer-box markdown-body" v-html="renderMarkdown(result.answer)"></div>
 
             <el-alert
-              v-if="result.refusal_reason"
-              :title="`触发安全或策略拦截：${result.refusal_reason}`"
+              v-if="result && false"
+              :title="`触发安全或策略拦截：${result?.refusal_reason || ''}`"
               type="error"
               :closable="false"
             />
@@ -166,8 +175,9 @@ import { ElMessage } from 'element-plus';
 import { Connection, Search, EditPen } from '@element-plus/icons-vue';
 import CitationList from '@/components/CitationList.vue';
 import { listKBDocuments, listKnowledgeBases, queryKB, streamKBQuery } from '@/api/kb';
-import { isAbortRequestError } from '@/api/request';
+import { isAbortRequestError, isHandledRequestError } from '@/api/request';
 import { applyQueryStreamEvent, createEmptyQueryResult, resolveQueryStreamPayload, type QueryResult } from '@/utils/queryStream';
+import { buildSafetyNotice } from '@/utils/safety';
 import { statusMeta } from '@/utils/status';
 import { marked } from 'marked';
 
@@ -212,6 +222,12 @@ const shortcuts = [
 ];
 
 const selectedBase = computed(() => bases.value.find((base) => String(base.id) === String(selectedBaseId.value)) || null);
+const resultSafetyNotice = computed(() => buildSafetyNotice({
+  answerMode: result.value?.answer_mode,
+  evidenceStatus: result.value?.evidence_status,
+  refusalReason: result.value?.refusal_reason,
+  safety: result.value?.safety
+}));
 
 const queryableDocuments = computed(() =>
   documents.value.filter((document) => ['fast_index_ready', 'enhancing', 'ready', 'hybrid_ready'].includes(document.status))
@@ -296,8 +312,14 @@ const ask = async () => {
     if (isAbortRequestError(error)) {
       return;
     }
+    if (isHandledRequestError(error)) {
+      result.value = null;
+      return;
+    }
     ElMessage.warning('流式问答失败，已回退为普通查询');
-    await askOnce();
+    await askOnce().catch(() => {
+      result.value = null;
+    });
   } finally {
     if (currentController === controller) {
       currentController = null;

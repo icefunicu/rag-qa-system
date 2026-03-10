@@ -46,6 +46,10 @@ export function getKBDocumentEvents(documentId: string) {
   return request.get(`/kb/documents/${documentId}/events`);
 }
 
+export function getKBDocumentVisualAssets(documentId: string) {
+  return request.get(`/kb/documents/${documentId}/visual-assets`);
+}
+
 export function createKBUpload(data: {
   base_id: string;
   file_name: string;

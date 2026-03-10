@@ -23,7 +23,7 @@ class IdempotencyState:
         return bool(self.key)
 
 
-def kb_readiness_checks(*, db: Any, storage: Any) -> dict[str, Any]:
+def kb_readiness_checks(*, db: Any, storage: Any, vector_store_checker: Any | None = None) -> dict[str, Any]:
     checks: dict[str, Any] = {}
     try:
         with db.connect() as conn:
@@ -39,6 +39,12 @@ def kb_readiness_checks(*, db: Any, storage: Any) -> dict[str, Any]:
         checks["object_storage"] = {"status": "ok"}
     except Exception as exc:
         checks["object_storage"] = {"status": "failed", "detail": str(exc)}
+
+    if vector_store_checker is not None:
+        try:
+            checks["vector_store"] = {"status": "ok", **dict(vector_store_checker() or {})}
+        except Exception as exc:
+            checks["vector_store"] = {"status": "failed", "detail": str(exc)}
 
     return checks
 

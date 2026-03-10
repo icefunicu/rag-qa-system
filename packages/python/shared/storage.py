@@ -95,6 +95,30 @@ class ObjectStorageClient:
             )
         )
 
+    def presign_get_object(self, storage_key: str, *, expires_in: int = 3600) -> str:
+        return str(
+            self._public.generate_presigned_url(
+                "get_object",
+                Params={
+                    "Bucket": self.settings.bucket,
+                    "Key": storage_key,
+                },
+                ExpiresIn=expires_in,
+            )
+        )
+
+    def presign_download_url(self, storage_key: str, *, expires_in: int = 3600) -> str:
+        return str(
+            self._public.generate_presigned_url(
+                "get_object",
+                Params={
+                    "Bucket": self.settings.bucket,
+                    "Key": storage_key,
+                },
+                ExpiresIn=expires_in,
+            )
+        )
+
     def list_parts(self, storage_key: str, upload_id: str) -> list[dict[str, Any]]:
         response = self._internal.list_parts(
             Bucket=self.settings.bucket,
@@ -149,17 +173,31 @@ class ObjectStorageClient:
                 return
             raise
 
-    def put_bytes(self, storage_key: str, body: bytes, *, metadata: dict[str, str] | None = None) -> None:
+    def put_bytes(
+        self,
+        storage_key: str,
+        body: bytes,
+        *,
+        metadata: dict[str, str] | None = None,
+        content_type: str | None = None,
+    ) -> None:
         self._internal.put_object(
             Bucket=self.settings.bucket,
             Key=storage_key,
             Body=body,
             Metadata=metadata or {},
+            ContentType=content_type or "application/octet-stream",
         )
 
     def download_file(self, storage_key: str, target_path: Path) -> None:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         self._internal.download_file(self.settings.bucket, storage_key, str(target_path))
+
+    def get_object_bytes(self, storage_key: str) -> tuple[bytes, str]:
+        response = self._internal.get_object(Bucket=self.settings.bucket, Key=storage_key)
+        body = response["Body"].read()
+        content_type = str(response.get("ContentType") or "application/octet-stream")
+        return body, content_type
 
     def build_storage_key(self, *, service: str, document_id: str, file_name: str) -> str:
         safe_name = (file_name or "source.bin").replace("\\", "_").replace("/", "_")

@@ -148,7 +148,15 @@
                       <span v-if="message.answer_mode" class="mode-tag">{{ answerModeLabel(message.answer_mode) }}</span>
                       <span v-if="message.model" class="model-tag">{{ message.model }}</span>
                     </div>
-                    <div v-if="message.role === 'assistant' && message.answer_mode === 'common_knowledge'" class="answer-warning">
+                    <div
+                      v-if="message.role === 'assistant' && message.safety_notice"
+                      class="answer-safety"
+                      :class="`is-${message.safety_notice.level}`"
+                    >
+                      <strong>{{ message.safety_notice.title }}</strong>
+                      <span>{{ message.safety_notice.message }}</span>
+                    </div>
+                    <div v-if="false" class="answer-warning">
                       常识兜底回答，不保证与当前知识库或业务规则完全一致，请人工核实。
                     </div>
                     <div v-if="message.role === 'assistant' && message.streaming && !message.content" class="rag-thinking">
@@ -237,8 +245,9 @@ import {
   updateChatSession,
   type ChatScope
 } from '@/api/chat';
-import { createIdempotencyKey, isAbortRequestError } from '@/api/request';
+import { createIdempotencyKey, isAbortRequestError, isHandledRequestError } from '@/api/request';
 import { statusMeta } from '@/utils/status';
+import { buildSafetyNotice } from '@/utils/safety';
 
 
 const route = useRoute();
@@ -301,6 +310,22 @@ const activeSessionTitle = computed(() => {
 
 const currentScopeSummary = computed(() => summarizeScope(buildScope()));
 const hasStreamingAssistant = computed(() => messages.value.some((item: any) => item.role === 'assistant' && item.streaming));
+
+function attachMessageSafety(message: any) {
+  if (!message || message.role !== 'assistant') {
+    return message;
+  }
+
+  return {
+    ...message,
+    safety_notice: buildSafetyNotice({
+      answerMode: message.answer_mode,
+      evidenceStatus: message.evidence_status,
+      refusalReason: message.refusal_reason,
+      safety: message.safety
+    })
+  };
+}
 
 const selectedCorpusSummary = computed(() => {
   if (scopeMode.value === 'all' && !selectedCorpusIds.value.length) {
@@ -410,7 +435,7 @@ async function selectSession(session: any) {
   applyScope(session.scope_json || defaultChatScope());
   await ensureDocuments(selectedCorpusIds.value);
   const res: any = await listChatMessages(activeSessionId.value);
-  messages.value = res.items || [];
+  messages.value = (res.items || []).map((item: any) => attachMessageSafety(item));
 }
 
 function startDraftSession() {
@@ -537,7 +562,9 @@ function applyPrompt(prompt: string) {
 function stopStreaming() {
   currentController?.abort();
   currentController = null;
-  messages.value = messages.value.map((item: any) => item?.streaming ? { ...item, streaming: false } : item);
+  messages.value = messages.value
+    .filter((item: any) => !(item?.streaming && item.role === 'assistant' && !String(item.content || item.answer || '').trim()))
+    .map((item: any) => item?.streaming ? attachMessageSafety({ ...item, streaming: false }) : item);
   asking.value = false;
 }
 
@@ -554,7 +581,7 @@ function updateStreamingAssistant(messageId: string, updater: (current: any) => 
   if (index < 0) {
     return;
   }
-  messages.value[index] = updater({ ...messages.value[index] });
+  messages.value[index] = attachMessageSafety(updater({ ...messages.value[index] }));
   void nextTick().then(() => {
     scrollMessagesToBottom();
   });
@@ -568,6 +595,7 @@ function applyChatStreamEvent(messageId: string, eventName: string, payload: Rec
       evidence_status: String(payload.evidence_status || current.evidence_status || ''),
       grounding_score: Number(payload.grounding_score ?? current.grounding_score ?? 0),
       refusal_reason: String(payload.refusal_reason || current.refusal_reason || ''),
+      safety: payload.safety ?? current.safety ?? null,
       retrieval: payload.retrieval || current.retrieval || null,
       strategy_used: String(payload.strategy_used || current.strategy_used || '')
     }));
@@ -596,7 +624,8 @@ function applyChatStreamEvent(messageId: string, eventName: string, payload: Rec
       content: String(payload.answer || current.content || ''),
       answer: String(payload.answer || current.answer || ''),
       grounding_score: Number(payload.grounding_score ?? current.grounding_score ?? 0),
-      refusal_reason: String(payload.refusal_reason || current.refusal_reason || '')
+      refusal_reason: String(payload.refusal_reason || current.refusal_reason || ''),
+      safety: payload.safety ?? current.safety ?? null
     }));
     return;
   }
@@ -609,6 +638,7 @@ function applyChatStreamEvent(messageId: string, eventName: string, payload: Rec
       content: String(payload.content || payload.answer || current.content || ''),
       answer: String(payload.answer || current.answer || ''),
       citations: Array.isArray(payload.citations) ? payload.citations : (current.citations || []),
+      safety: payload.safety ?? current.safety ?? null,
       retrieval: payload.retrieval || current.retrieval || null,
       latency: payload.latency || current.latency || null,
       cost: payload.cost || current.cost || null,
@@ -663,7 +693,7 @@ async function ask() {
     });
 
     question.value = '';
-    messages.value.push({
+    messages.value.push(attachMessageSafety({
       id: streamMessageId,
       session_id: sessionId,
       role: 'assistant',
@@ -681,8 +711,9 @@ async function ask() {
       provider: '',
       model: '',
       usage: {},
+      safety: null,
       streaming: true
-    });
+    }));
     await nextTick();
     scrollMessagesToBottom();
 
@@ -708,11 +739,15 @@ async function ask() {
     if (isAbortRequestError(error)) {
       return;
     }
+    messages.value = messages.value.filter((item: any) => !(item?.streaming && item.role === 'assistant' && !String(item.content || item.answer || '').trim()));
+    if (isHandledRequestError(error)) {
+      return;
+    }
     ElMessage.error('缁熶竴闂瓟娴佸紡杈撳嚭澶辫触锛岃閲嶈瘯');
     return;
   } finally {
     currentController = null;
-    messages.value = messages.value.map((item: any) => item?.streaming ? { ...item, streaming: false } : item);
+    messages.value = messages.value.map((item: any) => item?.streaming ? attachMessageSafety({ ...item, streaming: false }) : item);
     asking.value = false;
   }
 }
@@ -1046,6 +1081,28 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.answer-safety {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.answer-safety.is-warning {
+  border: 1px solid rgba(217, 119, 6, 0.24);
+  background: rgba(245, 158, 11, 0.12);
+  color: #92400e;
+}
+
+.answer-safety.is-error {
+  border: 1px solid rgba(220, 38, 38, 0.2);
+  background: rgba(254, 226, 226, 0.75);
+  color: #991b1b;
 }
 
 .answer-warning {

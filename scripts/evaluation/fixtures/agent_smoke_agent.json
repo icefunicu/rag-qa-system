@@ -1,0 +1,10 @@
+[
+  {
+    "id": "agent-1",
+    "category": "agent_multi",
+    "question": "国际出差在订票前需要谁审批？",
+    "expected_sections": ["International Travel Approval"],
+    "min_citations": 1,
+    "must_refuse_without_evidence": false
+  }
+]

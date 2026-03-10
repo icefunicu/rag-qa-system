@@ -18,7 +18,7 @@ from .kb_runtime import (
     db,
     storage,
 )
-from .kb_schemas import CompleteUploadRequest, CreateUploadRequest, PresignPartsRequest
+from .kb_schemas import ALLOWED_KB_FILE_TYPES, CompleteUploadRequest, CreateUploadRequest, PresignPartsRequest
 from .kb_upload_store import (
     complete_payload,
     list_uploaded_parts,
@@ -51,7 +51,7 @@ def create_upload(payload: CreateUploadRequest, request: Request, user: CurrentU
         return state.replay_payload
     try:
         file_type = payload.file_type.lower().lstrip(".")
-        if file_type not in {"txt", "pdf", "docx"}:
+        if file_type not in ALLOWED_KB_FILE_TYPES:
             raise_api_error(400, "unsupported_file_type", f"unsupported kb file type: {file_type}")
         ensure_base_exists(payload.base_id, user=user, request=request, action="kb.upload.create")
         upload_id = str(uuid4())
@@ -247,4 +247,3 @@ def complete_upload(upload_id: str, payload: CompleteUploadRequest, request: Req
     complete_idempotency(state, user, response_payload=result, resource_id=upload_id)
     KB_UPLOAD_REQUESTS_TOTAL.labels("complete_success").inc()
     return result
-

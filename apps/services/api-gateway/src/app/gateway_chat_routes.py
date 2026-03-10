@@ -6,10 +6,11 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from shared.auth import CurrentUser
+from shared.inflight_limiter import InflightLimiter
 from shared.sse import encode_sse_event
 
 from .db import to_json
@@ -23,13 +24,32 @@ from .gateway_chat_service import (
 )
 from .gateway_idempotency import begin_gateway_idempotency, complete_gateway_idempotency, fail_gateway_idempotency
 from .gateway_retrieval import retrieve_scope_evidence
-from .gateway_runtime import CHAT_PERMISSION, GATEWAY_CHAT_REQUESTS_TOTAL, gateway_db, runtime_settings
+from .gateway_runtime import CHAT_PERMISSION, GATEWAY_BACKPRESSURE_TOTAL, GATEWAY_CHAT_REQUESTS_TOTAL, gateway_db, runtime_settings
 from .gateway_schemas import CreateSessionRequest, SendMessageRequest, UpdateSessionRequest
-from .gateway_scope import default_scope, fetch_corpora, fetch_corpus_documents, resolve_scope_snapshot
+from .gateway_scope import default_scope, fetch_corpora, fetch_corpus_documents, normalize_execution_mode, resolve_scope_snapshot
 from .gateway_sessions import list_session_messages, load_session_for_user, persist_chat_turn, recent_history_messages
 
 
 router = APIRouter()
+CHAT_INFLIGHT_LIMITER = InflightLimiter("gateway_chat")
+
+
+def _reject_backpressure(*, request: Request, user: CurrentUser, endpoint: str, scope: str) -> None:
+    GATEWAY_BACKPRESSURE_TOTAL.labels(scope, endpoint).inc()
+    write_gateway_audit_event(
+        action=endpoint,
+        outcome="throttled",
+        request=request,
+        user=user,
+        resource_type="chat_session",
+        scope="owner",
+        details={"backpressure_scope": scope},
+    )
+    raise HTTPException(
+        status_code=429,
+        detail={"detail": "too many in-flight requests", "code": "too_many_inflight_requests"},
+        headers={"Retry-After": "1"},
+    )
 
 
 def _fetch_corpora(current_user: CurrentUser, *, include_counts: bool):
@@ -76,6 +96,7 @@ async def list_chat_corpus_documents(corpus_id: str, request: Request, user: Cur
 async def create_chat_session(payload: CreateSessionRequest, request: Request, user: CurrentUser) -> dict[str, Any]:
     require_permission(request, user, CHAT_PERMISSION, action="chat.session.create", resource_type="chat_session")
     scope_snapshot = await _resolve_scope_snapshot(user, payload.scope)
+    scope_snapshot["execution_mode"] = normalize_execution_mode(payload.execution_mode, default="grounded")
     session_id = str(uuid4())
     with gateway_db.connect() as conn:
         with conn.cursor() as cur:
@@ -108,6 +129,10 @@ async def update_chat_session(session_id: str, payload: UpdateSessionRequest, re
     next_scope = dict(current.get("scope_json") or default_scope())
     if payload.scope is not None:
         next_scope = await _resolve_scope_snapshot(user, payload.scope)
+    next_scope["execution_mode"] = normalize_execution_mode(
+        payload.execution_mode or str(next_scope.get("execution_mode") or ""),
+        default="grounded",
+    )
     next_title = payload.title.strip() if payload.title is not None else str(current.get("title") or "")
     with gateway_db.connect() as conn:
         with conn.cursor() as cur:
@@ -138,9 +163,26 @@ async def list_chat_messages(session_id: str, request: Request, user: CurrentUse
 @router.post("/api/v1/chat/sessions/{session_id}/messages")
 async def send_chat_message(session_id: str, payload: SendMessageRequest, request: Request, user: CurrentUser) -> dict[str, Any]:
     require_permission(request, user, CHAT_PERMISSION, action="chat.message.send", resource_type="chat_session", resource_id=session_id)
-    state = begin_gateway_idempotency(request, user, request_scope="chat.message.send", payload={"session_id": session_id, "question": payload.question.strip(), "scope": payload.scope.model_dump() if payload.scope is not None else None})
+    state = begin_gateway_idempotency(
+        request,
+        user,
+        request_scope="chat.message.send",
+        payload={
+            "session_id": session_id,
+            "question": payload.question.strip(),
+            "scope": payload.scope.model_dump() if payload.scope is not None else None,
+            "execution_mode": payload.execution_mode,
+        },
+    )
     if state.replay_payload is not None:
         return state.replay_payload
+    decision = CHAT_INFLIGHT_LIMITER.acquire(
+        user_key=str(user.user_id),
+        global_limit=runtime_settings.chat_max_in_flight_global,
+        per_user_limit=runtime_settings.chat_max_in_flight_per_user,
+    )
+    if not decision.allowed:
+        _reject_backpressure(request=request, user=user, endpoint="chat.message.send", scope=decision.scope)
     try:
         result = await handle_chat_message(
             session_id=session_id,
@@ -152,12 +194,15 @@ async def send_chat_message(session_id: str, payload: SendMessageRequest, reques
             resolve_scope_snapshot_fn=_resolve_scope_snapshot,
             recent_history_messages_fn=lambda sid, current_user, limit=8: recent_history_messages(sid, current_user, load_session_fn=lambda session, actor: load_session_for_user(session, actor, default_scope_fn=default_scope), limit=limit),
             retrieve_scope_evidence_fn=_retrieve_scope_evidence,
+            fetch_corpus_documents_fn=_fetch_corpus_documents,
             persist_chat_turn_fn=persist_chat_turn,
         )
     except Exception as exc:
         fail_gateway_idempotency(state, user, exc)
         GATEWAY_CHAT_REQUESTS_TOTAL.labels("error", "error").inc()
         raise
+    finally:
+        CHAT_INFLIGHT_LIMITER.release(decision.ticket)
     complete_gateway_idempotency(state, user, response_payload=result, resource_id=str(((result.get("message") or {}) if isinstance(result, dict) else {}).get("id") or session_id))
     return result
 
@@ -165,7 +210,17 @@ async def send_chat_message(session_id: str, payload: SendMessageRequest, reques
 @router.post("/api/v1/chat/sessions/{session_id}/messages/stream")
 async def stream_chat_message(session_id: str, payload: SendMessageRequest, request: Request, user: CurrentUser) -> StreamingResponse:
     require_permission(request, user, CHAT_PERMISSION, action="chat.message.stream", resource_type="chat_session", resource_id=session_id)
-    state = begin_gateway_idempotency(request, user, request_scope="chat.message.stream", payload={"session_id": session_id, "question": payload.question.strip(), "scope": payload.scope.model_dump() if payload.scope is not None else None})
+    state = begin_gateway_idempotency(
+        request,
+        user,
+        request_scope="chat.message.stream",
+        payload={
+            "session_id": session_id,
+            "question": payload.question.strip(),
+            "scope": payload.scope.model_dump() if payload.scope is not None else None,
+            "execution_mode": payload.execution_mode,
+        },
+    )
     if state.replay_payload is not None:
         result = state.replay_payload
         def replay_generate() -> Any:
@@ -173,10 +228,12 @@ async def stream_chat_message(session_id: str, payload: SendMessageRequest, requ
                 "metadata",
                 {
                     "strategy_used": result.get("strategy_used", ""),
+                    "execution_mode": result.get("execution_mode", "grounded"),
                     "answer_mode": result.get("answer_mode", ""),
                     "evidence_status": result.get("evidence_status", ""),
                     "grounding_score": result.get("grounding_score", 0),
                     "refusal_reason": result.get("refusal_reason", ""),
+                    "safety": result.get("safety", {}),
                     "retrieval": result.get("retrieval", {}),
                 },
             )
@@ -194,6 +251,13 @@ async def stream_chat_message(session_id: str, payload: SendMessageRequest, requ
             yield encode_sse_event("done", {"session_id": session_id})
 
         return StreamingResponse(replay_generate(), media_type="text/event-stream")
+    decision = CHAT_INFLIGHT_LIMITER.acquire(
+        user_key=str(user.user_id),
+        global_limit=runtime_settings.chat_max_in_flight_global,
+        per_user_limit=runtime_settings.chat_max_in_flight_per_user,
+    )
+    if not decision.allowed:
+        _reject_backpressure(request=request, user=user, endpoint="chat.message.stream", scope=decision.scope)
 
     async def generate() -> Any:
         try:
@@ -206,15 +270,22 @@ async def stream_chat_message(session_id: str, payload: SendMessageRequest, requ
                 resolve_scope_snapshot_fn=_resolve_scope_snapshot,
                 recent_history_messages_fn=lambda sid, current_user, limit=8: recent_history_messages(sid, current_user, load_session_fn=lambda session, actor: load_session_for_user(session, actor, default_scope_fn=default_scope), limit=limit),
                 retrieve_scope_evidence_fn=_retrieve_scope_evidence,
+                fetch_corpus_documents_fn=_fetch_corpus_documents,
             )
             yield encode_sse_event(
                 "metadata",
                 {
-                    "strategy_used": "common_knowledge_chat" if prepared["answer_mode"] == "common_knowledge" else "hybrid_grounded_qa",
+                    "strategy_used": "agent_grounded_qa"
+                    if prepared["execution_mode"] == "agent"
+                    else "common_knowledge_chat"
+                    if prepared["answer_mode"] == "common_knowledge"
+                    else "hybrid_grounded_qa",
+                    "execution_mode": prepared["execution_mode"],
                     "answer_mode": prepared["answer_mode"],
                     "evidence_status": prepared["evidence_status"],
                     "grounding_score": prepared["grounding_score"],
                     "refusal_reason": prepared["refusal_reason"],
+                    "safety": prepared["safety"],
                     "retrieval": prepared["retrieval_meta"],
                 },
             )
@@ -247,6 +318,7 @@ async def stream_chat_message(session_id: str, payload: SendMessageRequest, requ
                         evidence=prepared["evidence"],
                         answer_mode=prepared["answer_mode"],
                         on_answer=emit_answer,
+                        safety=prepared["safety"],
                     )
                 finally:
                     await answer_queue.put(None)
@@ -291,5 +363,7 @@ async def stream_chat_message(session_id: str, payload: SendMessageRequest, requ
                 "error",
                 {"detail": str(getattr(exc, "detail", "") or "stream chat failed")},
             )
+        finally:
+            CHAT_INFLIGHT_LIMITER.release(decision.ticket)
 
     return StreamingResponse(generate(), media_type="text/event-stream")

@@ -204,6 +204,7 @@ def write_markdown_report(report: dict[str, Any], output_path: Path) -> None:
         "",
         f"- Eval file: `{report['eval_file']}`",
         f"- Scope mode: `{report['scope_mode']}`",
+        f"- Execution mode: `{report['execution_mode']}`",
         f"- Corpus IDs: `{', '.join(report['corpus_ids'])}`",
         "",
         "## Overall",
@@ -246,6 +247,7 @@ def run_eval_job(
     scope_mode: str,
     corpus_ids: list[str],
     document_ids: list[str],
+    execution_mode: str = "grounded",
 ) -> dict[str, Any]:
     token = login(base_url, email, password)
     headers = {"Authorization": f"Bearer {token}"}
@@ -256,7 +258,7 @@ def run_eval_job(
     with httpx.Client(timeout=120.0) as client:
         session_response = client.post(
             f"{base_url.rstrip('/')}/chat/sessions",
-            json={"title": f"eval-{scope_mode}", "scope": scope},
+            json={"title": f"eval-{scope_mode}", "scope": scope, "execution_mode": execution_mode},
             headers=headers,
         )
         session_response.raise_for_status()
@@ -266,7 +268,7 @@ def run_eval_job(
             started = time.perf_counter()
             msg_resp = client.post(
                 f"{base_url.rstrip('/')}/chat/sessions/{session_id}/messages",
-                json={"question": case["question"], "scope": scope},
+                json={"question": case["question"], "scope": scope, "execution_mode": execution_mode},
                 headers=headers,
             )
             msg_resp.raise_for_status()
@@ -279,6 +281,7 @@ def run_eval_job(
         "scope_mode": scope_mode,
         "corpus_ids": corpus_ids,
         "document_ids": document_ids,
+        "execution_mode": execution_mode,
         "summary": summarize_results(results),
         "results": results,
     }
@@ -294,6 +297,7 @@ def main() -> int:
     parser.add_argument("--scope-mode", choices=["single", "multi", "all"], default="single")
     parser.add_argument("--corpus-id", action="append", default=[], help="repeatable; format kb:<uuid>")
     parser.add_argument("--document-id", action="append", default=[])
+    parser.add_argument("--execution-mode", choices=["grounded", "agent"], default="grounded")
     parser.add_argument("--output", default="artifacts/reports/long_rag_eval_report.json")
     parser.add_argument("--summary-output", default="artifacts/reports/long_rag_eval_report.md")
     args = parser.parse_args()
@@ -306,6 +310,7 @@ def main() -> int:
         scope_mode=args.scope_mode,
         corpus_ids=args.corpus_id,
         document_ids=args.document_id,
+        execution_mode=args.execution_mode,
     )
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

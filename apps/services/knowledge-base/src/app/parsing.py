@@ -24,6 +24,9 @@ class KBSection:
     text: str
     char_start: int
     char_end: int
+    source_kind: str = "text"
+    page_number: int | None = None
+    asset_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +39,9 @@ class KBChunk:
     search_text: str
     char_start: int
     char_end: int
+    source_kind: str = "text"
+    page_number: int | None = None
+    asset_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,8 @@ def parse_document(path: Path, file_type: str) -> ParsedKB:
     if normalized == "docx":
         doc = DocxDocument(str(path))
         return _parse_docx(doc)
+    if normalized in {"png", "jpg", "jpeg"}:
+        return ParsedKB(sections=[], chunks=[])
     raise ValueError(f"unsupported file type: {file_type}")
 
 

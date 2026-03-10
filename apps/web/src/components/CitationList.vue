@@ -23,23 +23,35 @@
         </div>
 
         <div class="pill-row citation-meta">
-          <el-tag size="small" effect="plain" type="info" class="meta-tag"><el-icon><Files /></el-icon> {{ citation.corpus_type || mode }}</el-tag>
-          <el-tag size="small" effect="plain" type="info" class="meta-tag"><el-icon><Location /></el-icon> {{ citation.char_range || '-' }}</el-tag>
-          
+          <el-tag size="small" effect="plain" type="info" class="meta-tag">
+            <el-icon><Files /></el-icon> {{ citation.corpus_type || mode }}
+          </el-tag>
+          <el-tag size="small" effect="plain" type="info" class="meta-tag">
+            <el-icon><Location /></el-icon> {{ citation.char_range || '-' }}
+          </el-tag>
+          <el-tag v-if="citation.page_number" size="small" effect="plain" type="success" class="meta-tag">
+            <el-icon><Picture /></el-icon> 第 {{ citation.page_number }} 页
+          </el-tag>
+
           <div v-if="citation.evidence_path?.final_score !== undefined" class="score-indicator">
             <span class="score-label">相关度</span>
             <div class="score-bar-bg">
-              <div 
+              <div
                 class="score-bar-fill"
                 :style="{ width: `${Math.min(100, Math.max(0, citation.evidence_path.final_score * 100))}%` }"
                 :class="getScoreClass(citation.evidence_path.final_score)"
               ></div>
             </div>
-            <span class="score-value" :class="getScoreClass(citation.evidence_path.final_score, true)">{{ (citation.evidence_path.final_score * 100).toFixed(1) }}%</span>
+            <span class="score-value" :class="getScoreClass(citation.evidence_path.final_score, true)">
+              {{ (citation.evidence_path.final_score * 100).toFixed(1) }}%
+            </span>
           </div>
         </div>
 
         <div class="quote-container">
+          <div v-if="citation.thumbnail_url" class="visual-preview">
+            <img :src="citation.thumbnail_url" :alt="citation.section_title || citation.document_title || 'visual evidence'" />
+          </div>
           <el-collapse class="custom-collapse">
             <el-collapse-item name="1">
               <template #title>
@@ -57,7 +69,7 @@
 </template>
 
 <script setup lang="ts">
-import { Document, Reading, Files, Location } from '@element-plus/icons-vue';
+import { Document, Reading, Files, Location, Picture } from '@element-plus/icons-vue';
 
 interface CitationItem {
   unit_id: string;
@@ -67,6 +79,11 @@ interface CitationItem {
   char_range: string;
   quote: string;
   corpus_type?: 'kb';
+  evidence_kind?: 'text' | 'visual_ocr';
+  source_kind?: string;
+  page_number?: number | null;
+  asset_id?: string;
+  thumbnail_url?: string;
   evidence_path?: {
     final_score?: number;
   };
@@ -233,9 +250,17 @@ const getScoreClass = (score: number, textOnly = false) => {
   background: #94a3b8;
 }
 
-.text-high { color: #10b981; }
-.text-medium { color: #f59e0b; }
-.text-low { color: #ef4444; }
+.text-high {
+  color: #10b981;
+}
+
+.text-medium {
+  color: #f59e0b;
+}
+
+.text-low {
+  color: #ef4444;
+}
 
 .score-value {
   font-size: 12px;
@@ -247,12 +272,28 @@ const getScoreClass = (score: number, textOnly = false) => {
 }
 
 .quote-container {
+  display: grid;
+  gap: 12px;
+}
+
+.visual-preview {
+  width: min(240px, 100%);
   border-radius: var(--radius-sm);
   overflow: hidden;
   border: 1px solid var(--border-color);
+  background: var(--bg-panel-muted);
+}
+
+.visual-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
 .custom-collapse {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-color);
   border-top: none;
   border-bottom: none;
 }
@@ -296,13 +337,13 @@ const getScoreClass = (score: number, textOnly = false) => {
   .citation-card-head {
     flex-direction: column;
   }
-  
+
   .score-indicator {
     margin-left: 0;
     width: 100%;
     margin-top: 8px;
   }
-  
+
   .citation-meta {
     flex-wrap: wrap;
   }

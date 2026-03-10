@@ -10,6 +10,7 @@ from pathlib import Path
 import psycopg
 from psycopg.rows import dict_row
 
+from .qdrant_store import ensure_qdrant_collection
 from .storage import ObjectStorageClient
 
 
@@ -44,6 +45,17 @@ def _wait_for_database(name: str, dsn: str) -> None:
             last_error = str(exc)
             time.sleep(INIT_RETRY_SECONDS)
     raise RuntimeError(f"{name} database is unavailable: {last_error}")
+
+
+def _wait_for_vector_store() -> dict[str, object]:
+    last_error = ""
+    for _ in range(INIT_RETRY_COUNT):
+        try:
+            return ensure_qdrant_collection()
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(INIT_RETRY_SECONDS)
+    raise RuntimeError(f"qdrant vector store is unavailable: {last_error}")
 
 
 def _migration_checksum(raw_sql: str) -> str:
@@ -141,6 +153,7 @@ def main() -> int:
     KB_BLOB_ROOT.mkdir(parents=True, exist_ok=True)
     storage = ObjectStorageClient()
     storage.ensure_bucket()
+    vector_store = _wait_for_vector_store()
 
     print(
         json.dumps(
@@ -150,6 +163,7 @@ def main() -> int:
                 "kb_migrations": kb_migrations,
                 "blob_root": str(KB_BLOB_ROOT),
                 "bucket": storage.settings.bucket,
+                "vector_store": vector_store,
             },
             ensure_ascii=False,
         )

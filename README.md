@@ -66,9 +66,9 @@
 | --- | --- |
 | Frontend | Vue 3, TypeScript, Vite, Element Plus, Pinia |
 | Gateway | FastAPI, Uvicorn, httpx, PyJWT, Prometheus client |
-| KB Service | FastAPI, boto3, pypdf, python-docx, PostgreSQL |
+| KB Service | FastAPI, boto3, Pillow, pypdf, python-docx, PostgreSQL |
 | Worker / Shared | Python, shared retrieval/auth/storage modules |
-| Storage / Infra | PostgreSQL, MinIO, Docker Compose |
+| Storage / Infra | PostgreSQL, MinIO, Qdrant, Docker Compose |
 | Quality | pytest, compileall, GitHub Actions, encoding check |
 
 ## 快速开始
@@ -136,7 +136,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/down.ps1
 
 1. 使用本地账号登录前端或调用 `/api/v1/auth/login`。
 2. 创建一个知识库。
-3. 上传 `txt`、`pdf` 或 `docx` 文档并等待 ingest 状态进入 `fast_index_ready` 或 `ready`。
+3. 上传 `txt`、`pdf`、`docx`、`png`、`jpg` 或 `jpeg` 文档并等待 ingest 状态进入 `fast_index_ready` 或 `ready`。
 4. 进入 KB 问答页或统一聊天页验证回答和引文。
 
 ## 默认访问地址
@@ -144,6 +144,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/down.ps1
 - Web: `http://localhost:5173`
 - Gateway: `http://localhost:8080`
 - KB Service: `http://localhost:8300`
+- Qdrant HTTP: `http://localhost:6333`
+- Qdrant gRPC: `localhost:6334`
 - MinIO API: `http://localhost:9000`
 - MinIO Console: `http://localhost:9001`
 - Gateway Health: `http://localhost:8080/healthz`
@@ -152,6 +154,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/down.ps1
 - KB Health: `http://localhost:8300/healthz`
 - KB Readiness: `http://localhost:8300/readyz`
 - KB Metrics: `http://localhost:8300/metrics`
+
+### Qdrant / FastEmbed 閰嶇疆琛ュ厖
+
+- `kb-service` 鍜?`kb-worker` 浣跨敤 `QDRANT_URL` 鍜?`QDRANT_COLLECTION` 璁块棶鍚戦噺瀛樺偍
+- 鏈湴鍚戦噺妯″瀷鐢?`FASTEMBED_MODEL_NAME`銆乣FASTEMBED_VECTOR_SIZE`銆乣FASTEMBED_THREADS` 鎺у埗
+- `GET /readyz` 鐜板湪浼氬悓鏃舵鏌?database`銆乣object_storage` 鍜?vector_store`
 
 ## 本地认证与权限
 
@@ -179,8 +187,10 @@ flowchart LR
     Gateway --> Audit["Audit / Metrics / Trace"]
     KB --> Worker["KB Worker"]
     KB --> Postgres["PostgreSQL"]
+    KB --> Qdrant["Qdrant"]
     KB --> MinIO["MinIO / S3 Compatible"]
     Worker --> Postgres
+    Worker --> Qdrant
     Worker --> MinIO
 ```
 
@@ -301,6 +311,9 @@ curl -X POST http://localhost:8300/api/v1/kb/query \
 - `txt`
 - `pdf`
 - `docx`
+- `png`
+- `jpg`
+- `jpeg`
 
 ## 开发与验证
 
@@ -359,3 +372,9 @@ python scripts/evaluation/run-eval-suite.py --password <pwd> --config <suite.jso
 ## 许可证
 
 本项目基于 [MIT License](LICENSE) 发布。
+
+## 2026-03 LangChain 集成说明
+
+- `kb-service` 与 `kb-worker` 现在通过 `langchain-qdrant` 读写 Qdrant，KB 检索链路的中间表示统一为 LangChain `Document`
+- `api-gateway` 与 `kb-service` 的回答生成统一为 LangChain prompt/runnable 链，外部 HTTP API 与 SSE 契约保持不变
+- 稀疏检索模型由 `FASTEMBED_SPARSE_MODEL_NAME` 控制，默认值为 `Qdrant/bm25`

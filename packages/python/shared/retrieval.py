@@ -27,6 +27,11 @@ class EvidenceBlock:
     corpus_id: str = ""
     corpus_type: str = ""
     service_type: str = ""
+    evidence_kind: str = "text"
+    source_kind: str = "text"
+    page_number: int | None = None
+    asset_id: str = ""
+    thumbnail_url: str = ""
     signal_scores: dict[str, float] = field(default_factory=dict)
     evidence_path: EvidencePath = field(default_factory=EvidencePath)
 

@@ -1,0 +1,10 @@
+# Expense Policy
+
+## Submission Window
+Employees must submit reimbursement requests within 30 calendar days after the expense occurs.
+
+## Approval Threshold
+Expenses above 1000 RMB require manager approval and finance review before reimbursement.
+
+## Missing Evidence
+Claims without receipts should be rejected unless the finance team grants an exception.

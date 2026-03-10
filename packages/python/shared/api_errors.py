@@ -37,6 +37,7 @@ def json_error_response(
     detail: str,
     code: str,
     errors: list[dict[str, Any]] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     payload: dict[str, Any] = {
         "detail": detail,
@@ -45,11 +46,12 @@ def json_error_response(
     }
     if errors:
         payload["errors"] = errors
-    return JSONResponse(status_code=status_code, content=payload)
+    return JSONResponse(status_code=status_code, content=payload, headers=headers)
 
 
 def http_exception_response(exc: HTTPException) -> JSONResponse:
     detail = exc.detail
+    headers = dict(exc.headers or {})
     if isinstance(detail, dict):
         message = str(detail.get("detail") or detail.get("message") or "request failed")
         code = str(detail.get("code") or _STATUS_CODE_MAP.get(exc.status_code, "http_error"))
@@ -60,12 +62,14 @@ def http_exception_response(exc: HTTPException) -> JSONResponse:
             detail=message,
             code=code,
             errors=normalized_errors,
+            headers=headers or None,
         )
 
     return json_error_response(
         status_code=exc.status_code,
         detail=str(detail or "request failed"),
         code=_STATUS_CODE_MAP.get(exc.status_code, "http_error"),
+        headers=headers or None,
     )
 
 

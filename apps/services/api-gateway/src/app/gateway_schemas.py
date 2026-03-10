@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+ALLOWED_EXECUTION_MODES = {"grounded", "agent"}
 
 
 class LoginRequest(BaseModel):
@@ -18,13 +21,44 @@ class ChatScopePayload(BaseModel):
 class CreateSessionRequest(BaseModel):
     title: str = Field(default="", max_length=120)
     scope: ChatScopePayload | None = None
+    execution_mode: str = Field(default="grounded", max_length=32)
+
+    @field_validator("execution_mode")
+    @classmethod
+    def validate_execution_mode(cls, value: str) -> str:
+        normalized = value.strip().lower() or "grounded"
+        if normalized not in ALLOWED_EXECUTION_MODES:
+            raise ValueError(f"unsupported execution mode: {normalized}")
+        return normalized
 
 
 class UpdateSessionRequest(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     scope: ChatScopePayload | None = None
+    execution_mode: str | None = Field(default=None, max_length=32)
+
+    @field_validator("execution_mode")
+    @classmethod
+    def validate_optional_execution_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if normalized not in ALLOWED_EXECUTION_MODES:
+            raise ValueError(f"unsupported execution mode: {normalized}")
+        return normalized
 
 
 class SendMessageRequest(BaseModel):
     question: str = Field(min_length=1, max_length=12000)
     scope: ChatScopePayload | None = None
+    execution_mode: str | None = Field(default=None, max_length=32)
+
+    @field_validator("execution_mode")
+    @classmethod
+    def validate_message_execution_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if normalized not in ALLOWED_EXECUTION_MODES:
+            raise ValueError(f"unsupported execution mode: {normalized}")
+        return normalized
