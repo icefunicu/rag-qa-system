@@ -96,12 +96,31 @@
                     :inactive-value="false"
                     active-text="常识兜底"
                     inactive-text="严格证据"
+                    @change="handleScopeModeChange"
                   />
                 </el-form-item>
               </el-form>
               <p class="scope-summary">{{ selectedCorpusSummary }}</p>
               <p class="scope-summary">
                 {{ allowCommonKnowledge ? '未命中知识库证据时，可退回通用知识回答；回答会标注风险提示。' : '仅当知识库有足够证据时才回答，并展示证据片段与引用。' }}
+              </p>
+            </div>
+          </el-popover>
+          <el-popover placement="bottom-start" :width="280" trigger="click">
+            <template #reference>
+              <button type="button" class="scope-chip">
+                <el-icon><Setting /></el-icon>
+                <span>{{ executionMode === 'agent' ? '智能体模式' : '标准问答' }}</span>
+              </button>
+            </template>
+            <div class="scope-popover">
+              <div class="scope-popover-title">执行模式</div>
+              <el-radio-group v-model="executionMode" size="small" @change="handleExecutionModeChange">
+                <el-radio-button value="grounded">标准模式</el-radio-button>
+                <el-radio-button value="agent">智能体 (Agent)</el-radio-button>
+              </el-radio-group>
+              <p class="scope-summary" style="margin-top: 12px;">
+                {{ executionMode === 'agent' ? '允许助手多步思考、分解问题并多次检索，适合解决复杂问题。' : '基于检索到的片段直接生成回答，速度较快。' }}
               </p>
             </div>
           </el-popover>
@@ -146,6 +165,7 @@
                     <div v-if="message.role === 'assistant'" class="bubble-meta">
                       <span class="assistant-name">RAG 助手</span>
                       <span v-if="message.answer_mode" class="mode-tag">{{ answerModeLabel(message.answer_mode) }}</span>
+                      <span v-if="message.execution_mode === 'agent'" class="mode-tag agent-tag">智能体模式</span>
                       <span v-if="message.model" class="model-tag">{{ message.model }}</span>
                     </div>
                     <div
@@ -164,10 +184,15 @@
                       <span>正在检索并生成回答...</span>
                     </div>
                     <div v-else class="message-content markdown-body" v-html="renderMarkdown(message.content)"></div>
-                    <div v-if="message.role === 'assistant' && message.retrieval" class="rag-meta">
-                      <span>检索 {{ message.retrieval.aggregate?.retrieval_ms || 0 }}ms</span>
-                      <span v-if="message.retrieval.aggregate?.selected_candidates">
+                    <div v-if="message.role === 'assistant'" class="rag-meta">
+                      <span v-if="message.retrieval">检索 {{ message.retrieval.aggregate?.retrieval_ms || 0 }}ms</span>
+                      <span v-if="message.retrieval?.aggregate?.selected_candidates">
                         · 召回 {{ message.retrieval.aggregate.selected_candidates }} 条
+                      </span>
+                      <span v-if="message.workflow_run" class="workflow-link">
+                        <a href="#" @click.prevent="showWorkflow(message.workflow_run)">
+                          <el-icon><Link /></el-icon> 查看执行轨迹
+                        </a>
                       </span>
                     </div>
                   </div>
@@ -222,6 +247,49 @@
           </div>
         </div>
       </main>
+
+      <el-drawer
+        v-model="workflowDrawerVisible"
+        title="执行轨迹 (Workflow Run)"
+        size="50%"
+        :destroy-on-close="true"
+      >
+        <div v-if="workflowRunDetail" class="workflow-detail">
+          <el-descriptions :column="1" border size="small">
+            <el-descriptions-item label="Run ID">{{ workflowRunDetail.id }}</el-descriptions-item>
+            <el-descriptions-item label="状态">
+              <el-tag :type="workflowRunDetail.status === 'completed' ? 'success' : (workflowRunDetail.status === 'failed' ? 'danger' : 'info')" size="small">
+                {{ workflowRunDetail.status }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="执行模式">{{ workflowRunDetail.execution_mode }}</el-descriptions-item>
+            <el-descriptions-item label="Trace ID" v-if="workflowRunDetail.trace_id">{{ workflowRunDetail.trace_id }}</el-descriptions-item>
+            <el-descriptions-item label="重试自" v-if="workflowRunDetail.retried_from_run_id">{{ workflowRunDetail.retried_from_run_id }}</el-descriptions-item>
+            <el-descriptions-item label="耗时 (LLM)" v-if="workflowRunDetail.llm_trace?.duration_ms">
+              {{ workflowRunDetail.llm_trace.duration_ms }} ms
+            </el-descriptions-item>
+            <el-descriptions-item label="路由策略 (Route Key)" v-if="workflowRunDetail.llm_trace?.route_key">
+              <el-tag size="small" type="info">{{ workflowRunDetail.llm_trace.route_key }}</el-tag>
+            </el-descriptions-item>
+          </el-descriptions>
+          <div class="workflow-section">
+            <h4>LLM Trace</h4>
+            <pre class="json-viewer">{{ JSON.stringify(workflowRunDetail.llm_trace || {}, null, 2) }}</pre>
+          </div>
+          <div class="workflow-section" v-if="workflowRunDetail.tool_calls?.length">
+            <h4>Tool Calls</h4>
+            <pre class="json-viewer">{{ JSON.stringify(workflowRunDetail.tool_calls || [], null, 2) }}</pre>
+          </div>
+          <div class="workflow-section">
+            <h4>Workflow State</h4>
+            <pre class="json-viewer">{{ JSON.stringify(workflowRunDetail.workflow_state || {}, null, 2) }}</pre>
+          </div>
+          <div class="workflow-actions" v-if="workflowRunDetail.status === 'failed'">
+            <el-button type="primary" :loading="retrying" @click="retryWorkflow(workflowRunDetail.id)">重试该执行</el-button>
+          </div>
+        </div>
+        <div v-else v-loading="loadingWorkflow" style="min-height: 200px;"></div>
+      </el-drawer>
     </section>
   </div>
 </template>
@@ -231,7 +299,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import CitationList from '@/components/CitationList.vue';
-import { Position, User, Platform, Connection, Plus, ChatLineRound, Aim } from '@element-plus/icons-vue';
+import { Position, User, Platform, Connection, Plus, ChatLineRound, Aim, Setting, Link } from '@element-plus/icons-vue';
 import { marked } from 'marked';
 import {
   createChatSession,
@@ -243,12 +311,13 @@ import {
   listChatSessions,
   streamChatMessage,
   updateChatSession,
+  getWorkflowRun,
+  retryWorkflowRun,
   type ChatScope
 } from '@/api/chat';
 import { createIdempotencyKey, isAbortRequestError, isHandledRequestError } from '@/api/request';
 import { statusMeta } from '@/utils/status';
 import { buildSafetyNotice } from '@/utils/safety';
-
 
 const route = useRoute();
 
@@ -267,6 +336,12 @@ const scopeMode = ref<'single' | 'multi' | 'all'>('all');
 const selectedCorpusIds = ref<string[]>([]);
 const selectedDocumentIds = ref<string[]>([]);
 const allowCommonKnowledge = ref(false);
+const executionMode = ref<'grounded' | 'agent'>('grounded');
+
+const workflowDrawerVisible = ref(false);
+const workflowRunDetail = ref<any>(null);
+const loadingWorkflow = ref(false);
+const retrying = ref(false);
 
 const suggestedQuestions = [
   '报销审批需要哪些角色签字？',
@@ -433,6 +508,7 @@ async function selectSession(session: any) {
   stopStreaming();
   activeSessionId.value = String(session.id || '');
   applyScope(session.scope_json || defaultChatScope());
+  executionMode.value = session.execution_mode === 'agent' ? 'agent' : 'grounded';
   await ensureDocuments(selectedCorpusIds.value);
   const res: any = await listChatMessages(activeSessionId.value);
   messages.value = (res.items || []).map((item: any) => attachMessageSafety(item));
@@ -444,6 +520,7 @@ function startDraftSession() {
   messages.value = [];
   question.value = '';
   applyScope(defaultChatScope());
+  executionMode.value = 'grounded';
 }
 
 async function renameActiveSession() {
@@ -511,7 +588,8 @@ async function ensureSession(): Promise<string> {
   }
 
   const res: any = await createChatSession({
-    scope: buildScope()
+    scope: buildScope(),
+    execution_mode: executionMode.value
   });
 
   activeSessionId.value = String(res.session_id || '');
@@ -529,6 +607,16 @@ async function handleScopeModeChange() {
   }
 
   await ensureDocuments(selectedCorpusIds.value);
+  if (activeSessionId.value) {
+    await updateChatSession(activeSessionId.value, { scope: buildScope() });
+  }
+}
+
+async function handleExecutionModeChange() {
+  if (activeSessionId.value) {
+    await updateChatSession(activeSessionId.value, { execution_mode: executionMode.value });
+    await loadSessions();
+  }
 }
 
 async function handleCorpusChange() {
@@ -539,6 +627,9 @@ async function handleCorpusChange() {
   await ensureDocuments(selectedCorpusIds.value);
   const validDocumentIds = new Set(documentOptions.value.map((item: any) => item.document_id));
   selectedDocumentIds.value = selectedDocumentIds.value.filter((item) => validDocumentIds.has(item));
+  if (activeSessionId.value) {
+    await updateChatSession(activeSessionId.value, { scope: buildScope() });
+  }
 }
 
 async function applyRoutePreset() {
@@ -592,12 +683,14 @@ function applyChatStreamEvent(messageId: string, eventName: string, payload: Rec
     updateStreamingAssistant(messageId, (current) => ({
       ...current,
       answer_mode: String(payload.answer_mode || current.answer_mode || ''),
+      execution_mode: String(payload.execution_mode || current.execution_mode || ''),
       evidence_status: String(payload.evidence_status || current.evidence_status || ''),
       grounding_score: Number(payload.grounding_score ?? current.grounding_score ?? 0),
       refusal_reason: String(payload.refusal_reason || current.refusal_reason || ''),
       safety: payload.safety ?? current.safety ?? null,
       retrieval: payload.retrieval || current.retrieval || null,
-      strategy_used: String(payload.strategy_used || current.strategy_used || '')
+      strategy_used: String(payload.strategy_used || current.strategy_used || ''),
+      workflow_run: payload.workflow_run || current.workflow_run || null
     }));
     return;
   }
@@ -643,6 +736,7 @@ function applyChatStreamEvent(messageId: string, eventName: string, payload: Rec
       latency: payload.latency || current.latency || null,
       cost: payload.cost || current.cost || null,
       usage: payload.usage || current.usage || {},
+      workflow_run: payload.workflow_run || current.workflow_run || null,
       streaming: false
     }));
     return;
@@ -700,6 +794,7 @@ async function ask() {
       content: '',
       answer: '',
       answer_mode: '',
+      execution_mode: executionMode.value,
       evidence_status: 'streaming',
       grounding_score: 0,
       refusal_reason: '',
@@ -722,7 +817,8 @@ async function ask() {
     currentController = controller;
     await streamChatMessage(sessionId, {
       question: currentQuestion,
-      scope: buildScope()
+      scope: buildScope(),
+      execution_mode: executionMode.value
     }, {
       idempotencyKey,
       signal: controller.signal,
@@ -735,7 +831,7 @@ async function ask() {
     });
 
     await loadSessions();
-  } catch (error) {
+  } catch (error: any) {
     if (isAbortRequestError(error)) {
       return;
     }
@@ -743,12 +839,48 @@ async function ask() {
     if (isHandledRequestError(error)) {
       return;
     }
-    ElMessage.error('缁熶竴闂瓟娴佸紡杈撳嚭澶辫触锛岃閲嶈瘯');
+    ElMessage.error('统一问答流式输出失败，请重试');
     return;
   } finally {
     currentController = null;
     messages.value = messages.value.map((item: any) => item?.streaming ? attachMessageSafety({ ...item, streaming: false }) : item);
     asking.value = false;
+  }
+}
+
+async function showWorkflow(workflowInfo: any) {
+  if (!workflowInfo || !workflowInfo.id) return;
+  workflowRunDetail.value = null;
+  workflowDrawerVisible.value = true;
+  loadingWorkflow.value = true;
+  try {
+    const res: any = await getWorkflowRun(workflowInfo.id);
+    workflowRunDetail.value = res;
+  } catch (e) {
+    ElMessage.error('获取执行轨迹失败');
+    workflowDrawerVisible.value = false;
+  } finally {
+    loadingWorkflow.value = false;
+  }
+}
+
+async function retryWorkflow(runId: string) {
+  try {
+    retrying.value = true;
+    await retryWorkflowRun(runId);
+    ElMessage.success('已发起重试，请查看新消息');
+    workflowDrawerVisible.value = false;
+    // reload messages
+    if (activeSessionId.value) {
+      const res: any = await listChatMessages(activeSessionId.value);
+      messages.value = (res.items || []).map((item: any) => attachMessageSafety(item));
+      await nextTick();
+      scrollMessagesToBottom();
+    }
+  } catch (e) {
+    ElMessage.error('重试失败');
+  } finally {
+    retrying.value = false;
   }
 }
 
@@ -1128,6 +1260,12 @@ onBeforeUnmount(() => {
   font-size: 11px;
 }
 
+.agent-tag {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: #059669;
+}
+
 .model-tag {
   padding: 2px 6px;
   border-radius: 999px;
@@ -1152,6 +1290,20 @@ onBeforeUnmount(() => {
   border-top: 1px dashed var(--border-color);
   font-size: 11px;
   color: var(--text-muted);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.workflow-link a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--blue-600);
+  text-decoration: none;
+}
+.workflow-link a:hover {
+  text-decoration: underline;
 }
 
 .inline-citations {
@@ -1225,6 +1377,32 @@ onBeforeUnmount(() => {
 
 .composer-bar .send-btn {
   flex-shrink: 0;
+}
+
+.workflow-detail {
+  padding: 0 20px 20px;
+}
+.workflow-section {
+  margin-top: 20px;
+}
+.workflow-section h4 {
+  margin-bottom: 10px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.json-viewer {
+  background: var(--bg-panel-muted);
+  border: 1px solid var(--border-color);
+  padding: 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  max-height: 300px;
+  overflow: auto;
+  font-family: var(--font-mono);
+}
+.workflow-actions {
+  margin-top: 20px;
+  text-align: right;
 }
 
 /* Markdown Base Styles (scoped to .markdown-body inside bubble) */
