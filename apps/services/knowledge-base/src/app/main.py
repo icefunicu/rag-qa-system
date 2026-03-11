@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -18,7 +19,13 @@ from .kb_api_support import check_readiness as _kb_readiness_checks
 from .kb_analytics_routes import router as kb_analytics_router
 from .kb_base_routes import router as kb_base_router
 from .kb_chunk_routes import router as kb_chunk_router
-from .kb_connector_routes import router as kb_connector_router
+from .kb_connector_routes import (
+    has_active_scheduled_connectors,
+    router as kb_connector_router,
+    run_due_connectors_batch,
+    set_connector_scheduler_reconciler,
+)
+from .kb_connector_scheduler import ConnectorSchedulerManager
 from .kb_ingest_routes import router as kb_ingest_router
 from .kb_query_routes import router as kb_query_router
 from .kb_runtime import db, logger, prepare_runtime, storage
@@ -28,13 +35,25 @@ from .kb_upload_routes import router as kb_upload_router
 from .kb_visual_routes import router as kb_visual_router
 
 
+CONNECTOR_SCHEDULER = ConnectorSchedulerManager(
+    has_active_schedules=has_active_scheduled_connectors,
+    run_due_batch=run_due_connectors_batch,
+)
+
+
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     warnings = ensure_auth_configuration_ready()
     for warning in warnings:
         logger.warning("kb-service auth configuration warning: %s", warning)
     prepare_runtime()
+    loop = asyncio.get_running_loop()
+    CONNECTOR_SCHEDULER.bind_loop(loop)
+    set_connector_scheduler_reconciler(CONNECTOR_SCHEDULER.reconcile)
+    CONNECTOR_SCHEDULER.reconcile()
+    app.state.connector_scheduler = CONNECTOR_SCHEDULER
     yield
+    await CONNECTOR_SCHEDULER.shutdown()
 
 
 app = FastAPI(title="RAG-QA 2.0 KB Service", version="3.0.0", lifespan=lifespan)

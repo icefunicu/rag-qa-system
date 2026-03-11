@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Request
@@ -41,7 +42,7 @@ def fetch_base_documents_with_cursor(cur, base_id: str, *, user: CurrentUser) ->
             """,
             (base_id, user.user_id),
         )
-    return cur.fetchall()
+    return [serialize_document(row) for row in cur.fetchall()]
 
 
 def load_base(base_id: str, *, user: CurrentUser, request: Request | None = None, action: str = "kb.base.get") -> dict[str, Any]:
@@ -103,7 +104,7 @@ def load_document_unscoped(document_id: str) -> dict[str, Any]:
             row = cur.fetchone()
     if row is None:
         raise_api_error(404, "document_not_found", "document not found")
-    return row
+    return serialize_document(row)
 
 
 def load_visual_asset(
@@ -211,12 +212,62 @@ def load_latest_ingest_job_for_document(document_id: str, *, user: CurrentUser) 
     return row
 
 
+def list_document_versions(document_id: str, *, user: CurrentUser) -> list[dict[str, Any]]:
+    document = load_document(document_id, user=user, action="kb.document.versions")
+    family_key = str(document.get("version_family_key") or "")
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            if can_manage_everything(user):
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM kb_documents
+                    WHERE base_id = %s
+                      AND version_family_key = %s
+                    ORDER BY is_current_version DESC, version_number DESC, created_at DESC
+                    """,
+                    (document["base_id"], family_key),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM kb_documents
+                    WHERE base_id = %s
+                      AND version_family_key = %s
+                      AND created_by = %s
+                    ORDER BY is_current_version DESC, version_number DESC, created_at DESC
+                    """,
+                    (document["base_id"], family_key, user.user_id),
+                )
+            rows = cur.fetchall()
+    return [serialize_document(row) for row in rows]
+
+
 def serialize_ingest_job(row: dict[str, Any]) -> dict[str, Any]:
     return {
         **row,
         "job_id": str(row.get("id") or ""),
         "retryable": str(row.get("status") or "") in {"retry", "failed", "dead_letter"},
     }
+
+
+def serialize_document(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "effective_now": document_effective_now(row),
+    }
+
+
+def document_effective_now(row: dict[str, Any], *, reference_time: datetime | None = None) -> bool:
+    now = reference_time or datetime.now(timezone.utc)
+    effective_from = row.get("effective_from")
+    effective_to = row.get("effective_to")
+    if isinstance(effective_from, datetime) and effective_from > now:
+        return False
+    if isinstance(effective_to, datetime) and effective_to < now:
+        return False
+    return True
 
 
 def list_document_visual_assets(document_id: str, *, user: CurrentUser) -> list[dict[str, Any]]:

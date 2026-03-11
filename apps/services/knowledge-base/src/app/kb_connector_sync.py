@@ -43,6 +43,7 @@ def load_existing_connector_documents(*, base_id: str, source_type: str, cur: An
         FROM kb_documents
         WHERE base_id = %s
           AND source_type = %s
+          AND is_current_version = TRUE
         """,
         (base_id, source_type),
     )
@@ -241,7 +242,8 @@ def execute_connector_sync(
 
                 candidate = existing_by_source_uri[item.source_uri]
                 existing = existing_documents.get(item.source_uri) or {}
-                document_id = str(existing.get("id") or uuid4())
+                create_new_version = item.action == "create" or item.reason == "content_changed"
+                document_id = str(uuid4()) if create_new_version else str(existing.get("id") or uuid4())
                 job_id = str(uuid4())
                 storage_key = storage.build_storage_key(
                     service=storage_service,
@@ -269,12 +271,14 @@ def execute_connector_sync(
                             id, base_id, file_name, file_type, content_hash, storage_path,
                             storage_key, size_bytes, status, query_ready, enhancement_status,
                             created_by, stats_json, source_type, source_uri, source_updated_at,
-                            source_deleted_at, last_synced_at, source_metadata_json
+                            source_deleted_at, last_synced_at, source_metadata_json,
+                            version_family_key, version_label, version_number, version_status,
+                            is_current_version, effective_from, supersedes_document_id
                         )
                         VALUES (
                             %s, %s, %s, %s, %s, '',
                             %s, %s, 'uploaded', FALSE, '', %s, %s::jsonb, %s, %s, %s,
-                            NULL, NOW(), %s::jsonb
+                            NULL, NOW(), %s::jsonb, %s, %s, %s, 'active', TRUE, %s, NULL
                         )
                         """,
                         (
@@ -291,6 +295,66 @@ def execute_connector_sync(
                             candidate.source_uri,
                             candidate.source_updated_at,
                             to_json(candidate.source_metadata),
+                            document_id,
+                            "v1",
+                            1,
+                            candidate.source_updated_at,
+                        ),
+                    )
+                elif item.reason == "content_changed":
+                    previous_version_number = int(existing.get("version_number") or 1)
+                    next_version_number = previous_version_number + 1
+                    version_family_key = str(existing.get("version_family_key") or existing.get("id") or "")
+                    cur.execute(
+                        """
+                        UPDATE kb_documents
+                        SET is_current_version = FALSE,
+                            version_status = CASE
+                                WHEN version_status = 'active' THEN 'superseded'
+                                ELSE version_status
+                            END,
+                            updated_at = NOW()
+                        WHERE base_id = %s
+                          AND version_family_key = %s
+                          AND is_current_version = TRUE
+                        """,
+                        (base_id, version_family_key),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO kb_documents (
+                            id, base_id, file_name, file_type, content_hash, storage_path,
+                            storage_key, size_bytes, status, query_ready, enhancement_status,
+                            created_by, stats_json, source_type, source_uri, source_updated_at,
+                            source_deleted_at, last_synced_at, source_metadata_json,
+                            version_family_key, version_label, version_number, version_status,
+                            is_current_version, effective_from, supersedes_document_id
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, %s, '',
+                            %s, %s, 'uploaded', FALSE, '', %s, %s::jsonb, %s, %s, %s,
+                            NULL, NOW(), %s::jsonb, %s, %s, %s, 'active', TRUE, %s, %s
+                        )
+                        """,
+                        (
+                            document_id,
+                            base_id,
+                            candidate.file_name,
+                            candidate.file_type,
+                            candidate.content_hash,
+                            storage_key,
+                            candidate.size_bytes,
+                            user.user_id,
+                            to_json(next_stats),
+                            source_type,
+                            candidate.source_uri,
+                            candidate.source_updated_at,
+                            to_json(candidate.source_metadata),
+                            version_family_key,
+                            f"v{next_version_number}",
+                            next_version_number,
+                            candidate.source_updated_at,
+                            existing.get("id"),
                         ),
                     )
                 else:

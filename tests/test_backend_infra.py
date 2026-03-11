@@ -2031,6 +2031,187 @@ def test_retrieve_merge_documents_include_visual_metadata() -> None:
     assert item.thumbnail_url == "/api/v1/kb/visual-assets/asset-1/thumbnail"
 
 
+def test_resolve_document_ids_defaults_to_current_active_effective_versions(monkeypatch) -> None:
+    kb_retrieve = _load_kb_module("app.retrieve")
+    executed_queries: list[str] = []
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self._rows = []
+
+        def execute(self, query, params=None):
+            executed_queries.append(query)
+            self._rows = [{"id": "doc-current"}]
+
+        def fetchall(self):
+            return list(self._rows)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Connection:
+        def cursor(self):
+            return _Cursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(kb_retrieve.db, "connect", lambda: _Connection())
+
+    resolved = kb_retrieve._resolve_document_ids(base_id="base-1", document_ids=[])
+
+    assert resolved == ["doc-current"]
+    assert len(executed_queries) == 1
+    assert "version_status = 'active'" in executed_queries[0]
+    assert "is_current_version = TRUE" in executed_queries[0]
+    assert "effective_from IS NULL OR effective_from <= NOW()" in executed_queries[0]
+
+
+def test_resolve_document_ids_keeps_explicit_version_selection(monkeypatch) -> None:
+    kb_retrieve = _load_kb_module("app.retrieve")
+    executed_queries: list[str] = []
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self._rows = []
+
+        def execute(self, query, params=None):
+            executed_queries.append(query)
+            self._rows = [{"id": "doc-legacy"}]
+
+        def fetchall(self):
+            return list(self._rows)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Connection:
+        def cursor(self):
+            return _Cursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(kb_retrieve.db, "connect", lambda: _Connection())
+
+    resolved = kb_retrieve._resolve_document_ids(base_id="base-1", document_ids=["doc-legacy"])
+
+    assert resolved == ["doc-legacy"]
+    assert len(executed_queries) == 1
+    assert "id = ANY" in executed_queries[0]
+    assert "version_status = 'active'" not in executed_queries[0]
+
+
+def test_create_upload_request_normalizes_version_metadata() -> None:
+    kb_schemas = _load_kb_module("app.kb_schemas")
+
+    payload = kb_schemas.CreateUploadRequest(
+        base_id="base-1",
+        file_name="policy.pdf",
+        file_type=".PDF",
+        size_bytes=1024,
+        category="policy",
+        version_family_key=" expense-policy ",
+        version_label=" 2026-Q1 ",
+        version_number=3,
+        version_status=" Active ",
+        is_current_version=True,
+        supersedes_document_id=" doc-old ",
+    )
+
+    assert payload.file_type == "pdf"
+    assert payload.version_family_key == "expense-policy"
+    assert payload.version_label == "2026-Q1"
+    assert payload.version_status == "active"
+    assert payload.supersedes_document_id == "doc-old"
+
+
+def test_update_document_request_rejects_non_active_current_version() -> None:
+    kb_schemas = _load_kb_module("app.kb_schemas")
+
+    try:
+        kb_schemas.UpdateDocumentRequest(version_status="archived", is_current_version=True)
+    except ValidationError as exc:
+        assert "current version must use active status" in str(exc)
+    else:
+        raise AssertionError("expected invalid current version status to raise ValidationError")
+
+
+def test_build_version_diff_payload_summarizes_changes() -> None:
+    kb_base_routes = _load_kb_module("app.kb_base_routes")
+
+    source_chunks = [
+        {"section_index": 0, "chunk_index": 0, "section_title": "Overview", "text_content": "line-a", "disabled": False},
+        {"section_index": 1, "chunk_index": 0, "section_title": "Rules", "text_content": "old-rule", "disabled": False},
+    ]
+    target_chunks = [
+        {"section_index": 0, "chunk_index": 0, "section_title": "Overview", "text_content": "line-a", "disabled": False},
+        {"section_index": 1, "chunk_index": 0, "section_title": "Rules", "text_content": "new-rule", "disabled": False},
+        {"section_index": 2, "chunk_index": 0, "section_title": "Appendix", "text_content": "extra", "disabled": False},
+    ]
+
+    payload = kb_base_routes._build_version_diff_payload(
+        source_document={"id": "doc-v1", "version_label": "v1", "file_name": "policy-v1.pdf"},
+        source_chunks=source_chunks,
+        target_document={"id": "doc-v2", "version_label": "v2", "file_name": "policy-v2.pdf"},
+        target_chunks=target_chunks,
+    )
+
+    assert payload["summary"]["added_chunks"] == 1
+    assert payload["summary"]["removed_chunks"] == 0
+    assert payload["summary"]["modified_chunks"] == 1
+    assert "--- v1" in payload["diff_text"]
+    assert "+++ v2" in payload["diff_text"]
+    assert "new-rule" in payload["diff_text"]
+
+
+def test_connector_scheduler_manager_runs_only_when_active() -> None:
+    kb_scheduler = _load_kb_module("app.kb_connector_scheduler")
+    active = {"value": False}
+    calls: list[dict[str, object]] = []
+
+    def has_active() -> bool:
+        return bool(active["value"])
+
+    def run_due_batch(*, limit: int, dry_run: bool, user) -> dict[str, object]:
+        calls.append({"limit": limit, "dry_run": dry_run, "user_id": user.user_id})
+        active["value"] = False
+        return {"items": [], "count": 0}
+
+    async def scenario() -> None:
+        manager = kb_scheduler.ConnectorSchedulerManager(
+            has_active_schedules=has_active,
+            run_due_batch=run_due_batch,
+            min_poll_seconds=5,
+            max_batch_size=3,
+        )
+        manager.bind_loop(asyncio.get_running_loop())
+        manager.reconcile()
+        await asyncio.sleep(0.05)
+        assert calls == []
+        active["value"] = True
+        manager.reconcile()
+        await asyncio.sleep(0.1)
+        assert len(calls) == 1
+        assert calls[0]["limit"] == 3
+        assert calls[0]["dry_run"] is False
+        await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_request_service_json_preserves_upstream_4xx() -> None:
     gateway_transport = _load_gateway_module("app.gateway_transport")
 

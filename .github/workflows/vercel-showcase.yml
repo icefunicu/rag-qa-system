@@ -1,0 +1,70 @@
+name: Vercel Showcase CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/**"
+    paths:
+      - ".github/workflows/vercel-showcase.yml"
+      - ".env.vercel.example"
+      - "apps/web/**"
+      - "scripts/quality/check-encoding.py"
+      - "scripts/quality/check-vercel-env.py"
+      - "README.md"
+  pull_request:
+    paths:
+      - ".github/workflows/vercel-showcase.yml"
+      - ".env.vercel.example"
+      - "apps/web/**"
+      - "scripts/quality/check-encoding.py"
+      - "scripts/quality/check-vercel-env.py"
+      - "README.md"
+
+jobs:
+  vercel-showcase-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Explain dry-run scope
+        run: |
+          echo "This workflow is a dry-run showcase for Vercel."
+          echo "It validates the dedicated Vercel env template and builds the frontend in --mode vercel."
+          echo "It does not call vercel deploy, does not create GitHub deployments, and does not require real cloud secrets."
+
+      - name: Encoding check
+        run: python scripts/quality/check-encoding.py
+
+      - name: Validate Vercel showcase env
+        run: python scripts/quality/check-vercel-env.py .env.vercel.example
+
+      - name: Prepare Vercel mode env file
+        run: cp .env.vercel.example .env.vercel
+
+      - name: Install frontend dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Build frontend in Vercel mode
+        working-directory: apps/web
+        run: npm run build -- --mode vercel
+
+      - name: Upload showcase frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vercel-showcase-dist
+          path: apps/web/dist
+          if-no-files-found: error

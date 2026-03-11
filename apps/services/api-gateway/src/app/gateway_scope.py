@@ -70,14 +70,19 @@ async def fetch_corpus_documents(client: httpx.AsyncClient, *, user: CurrentUser
     for item in items:
         status_value = str(item.get("status") or "")
         queryable = bool(item.get("query_ready")) or status_value in QUERYABLE_STATUSES
+        title = str(item.get("title") or item.get("file_name") or "")
+        version_label = str(item.get("version_label") or "").strip()
+        version_suffix = f" [{version_label}]" if version_label else ""
+        if bool(item.get("is_current_version")):
+            version_suffix = f"{version_suffix} [current]" if version_suffix else " [current]"
         normalized.append(
             {
                 "id": str(item.get("id") or ""),
                 "document_id": str(item.get("id") or ""),
                 "corpus_id": corpus_id,
                 "corpus_type": corpus_type,
-                "display_name": str(item.get("title") or item.get("file_name") or ""),
-                "title": str(item.get("title") or item.get("file_name") or ""),
+                "display_name": f"{title}{version_suffix}",
+                "title": title,
                 "file_name": str(item.get("file_name") or item.get("title") or ""),
                 "status": status_value,
                 "query_ready": queryable,

@@ -360,6 +360,7 @@ def _resolve_document_ids(*, base_id: str, document_ids: list[str]) -> list[str]
                     WHERE base_id = %s
                       AND id = ANY(%s::uuid[])
                       AND query_ready = TRUE
+                      AND source_deleted_at IS NULL
                     ORDER BY created_at DESC
                     """,
                     (base_id, document_ids),
@@ -371,7 +372,12 @@ def _resolve_document_ids(*, base_id: str, document_ids: list[str]) -> list[str]
                     FROM kb_documents
                     WHERE base_id = %s
                       AND query_ready = TRUE
-                    ORDER BY created_at DESC
+                      AND source_deleted_at IS NULL
+                      AND version_status = 'active'
+                      AND is_current_version = TRUE
+                      AND (effective_from IS NULL OR effective_from <= NOW())
+                      AND (effective_to IS NULL OR effective_to >= NOW())
+                    ORDER BY version_number DESC, created_at DESC
                     """,
                     (base_id,),
                 )

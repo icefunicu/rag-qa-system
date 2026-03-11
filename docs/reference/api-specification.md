@@ -228,10 +228,71 @@ SSE 流式回答，事件顺序：
 
 - `GET /api/v1/kb/bases/{base_id}/documents`
 - `GET /api/v1/kb/documents/{document_id}`
+- `GET /api/v1/kb/documents/{document_id}/versions`
+- `GET /api/v1/kb/documents/{document_id}/versions/{version_id}/content`
+- `GET /api/v1/kb/documents/{document_id}/versions/{version_id}/diff`
 - `PATCH /api/v1/kb/documents/{document_id}`
 - `DELETE /api/v1/kb/documents/{document_id}`
 - `GET /api/v1/kb/documents/{document_id}/events`
 - `GET /api/v1/kb/documents/{document_id}/visual-assets`
+
+文档对象新增的版本治理字段：
+
+- `version_family_key`：同一份业务文档的版本家族标识。
+- `version_label`：面向业务展示的版本标签，例如 `v2`、`2026-Q1`。
+- `version_number`：整数版本号，便于排序和治理。
+- `version_status`：当前支持 `active | draft | superseded | archived`。
+- `is_current_version`：是否作为默认检索候选版本。
+- `effective_from` / `effective_to`：版本生效时间窗口。
+- `supersedes_document_id`：当前版本替代的是哪一个旧文档。
+- `effective_now`：服务端计算字段，表示当前时刻是否处于生效窗口。
+
+### `GET /api/v1/kb/documents/{document_id}/versions`
+
+- 返回当前文档所在版本家族的全部版本。
+- 默认按 `is_current_version DESC, version_number DESC, created_at DESC` 排序。
+- 适合前端做“当前版本 + 历史版本”面板，也适合运营排查旧版为何还被引用。
+
+### `GET /api/v1/kb/documents/{document_id}/versions/{version_id}/content`
+
+- 返回指定历史版本或当前版本的正文内容。
+- 输出里包含 `sections[*].text_content` 和拼接后的 `full_text`，方便前端做“查看历史版本原文”。
+- `include_disabled=true` 时也会返回被人工禁用的切片，适合治理排查。
+
+### `GET /api/v1/kb/documents/{document_id}/versions/{version_id}/diff`
+
+- 默认把 `version_id` 指向的版本和当前页面文档做差异对比。
+- 也支持通过 `compare_to_document_id` 指定另一个同家族版本做对比。
+- 返回：
+  - `source`
+  - `target`
+  - `diff.summary`
+  - `diff.diff_text`
+- `diff.summary` 当前包含 `added_chunks`、`removed_chunks`、`modified_chunks`、`changed_sections`，便于直接向业务方解释“新版具体改了哪些地方”。
+
+### `PATCH /api/v1/kb/documents/{document_id}`
+
+除 `file_name`、`category` 外，还支持以下版本治理字段：
+
+```json
+{
+  "version_family_key": "expense-policy",
+  "version_label": "2026-Q1",
+  "version_number": 3,
+  "version_status": "active",
+  "is_current_version": true,
+  "effective_from": "2026-03-11T00:00:00Z",
+  "effective_to": null,
+  "supersedes_document_id": "old-doc-uuid"
+}
+```
+
+规则说明：
+
+- `is_current_version=true` 时，`version_status` 必须是 `active`。
+- 如果 `effective_from` 在未来，文档暂时不能标记为 current；建议先保持 `active + is_current_version=false`，等正式切换时再升 current。
+- 同一 `base_id + version_family_key` 下切换 current 版本时，服务端会自动取消同家族其他 current 标记，并把仍是 `active` 的旧版本降为 `superseded`。
+- `supersedes_document_id` 必须和当前文档属于同一个知识库。
 
 常见文档状态：
 
@@ -251,6 +312,33 @@ SSE 流式回答，事件顺序：
 - `POST /api/v1/kb/uploads/{upload_id}/complete`
 - `GET /api/v1/kb/ingest-jobs/{job_id}`
 - `POST /api/v1/kb/ingest-jobs/{job_id}/retry`
+
+### `POST /api/v1/kb/uploads`
+
+除了基础上传字段，也支持在导入时直接声明版本治理信息：
+
+```json
+{
+  "base_id": "base-uuid",
+  "file_name": "expense-policy-2026.pdf",
+  "file_type": "pdf",
+  "size_bytes": 204800,
+  "category": "finance",
+  "version_family_key": "expense-policy",
+  "version_label": "2026-Q1",
+  "version_number": 3,
+  "version_status": "active",
+  "is_current_version": true,
+  "effective_from": "2026-03-11T00:00:00Z",
+  "effective_to": null,
+  "supersedes_document_id": "doc-previous-version"
+}
+```
+
+导入时的默认行为：
+
+- 如果没有提供任何版本字段，系统会把该文档当作一个独立版本家族，默认生成 `v1`、`version_number=1`、`is_current_version=true`。
+- 如果提供了 `supersedes_document_id`，但没有显式传 `version_family_key` / `version_number` / `version_label`，服务端会继承旧文档的版本家族，并自动把版本号递增、版本标签补成 `vN`。
 
 说明：
 
@@ -295,6 +383,17 @@ SSE 流式回答，事件顺序：
 
 - `POST /api/v1/kb/query`
 - `POST /api/v1/kb/query/stream`
+
+版本选择规则：
+
+- 当请求显式传入 `document_ids` 时，系统会严格按这些文档 ID 检索。企业用户可以手动指定旧制度、旧合同、旧手册做追溯查询。
+- 当请求不传 `document_ids` 时，系统默认只在“当前生效版本”中检索，也就是同时满足：
+  - `query_ready = true`
+  - `source_deleted_at IS NULL`
+  - `version_status = active`
+  - `is_current_version = true`
+  - 当前时间落在 `effective_from / effective_to` 生效窗口内
+- 这条规则用于解决“旧版本和新版本同时存在时，系统默认应该选谁”的企业场景问题。
 
 流式接口事件顺序：
 
@@ -353,6 +452,13 @@ SSE 流式回答，事件顺序：
 - `GET /api/v1/kb/connectors/{connector_id}/runs`
 - `POST /api/v1/kb/connectors/{connector_id}/sync`
 - `POST /api/v1/kb/connectors/run-due`
+
+连接器同步的版本行为：
+
+- 同一 `source_type + source_uri` 在 current 视角下只保留一个当前版本。
+- 当连接器检测到内容哈希变化时，不再原地覆盖旧文档，而是创建一个新的文档版本，并把旧 current 版本自动降为 `superseded`。
+- 当只是文件名变化或来源恢复时，仍沿用原文档更新，避免无意义地制造新版本。
+- KB Service 内部的定时同步 runner 只有在存在 `schedule_enabled=true` 的连接器时才会启动；当没有任何已启用调度的连接器时，runner 会自动停掉，避免空转占用资源。
 
 当前支持的连接器类型：
 

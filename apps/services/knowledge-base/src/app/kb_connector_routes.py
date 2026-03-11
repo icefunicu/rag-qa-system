@@ -14,13 +14,14 @@ from .kb_api_support import audit_event, can_manage_everything, require_kb_permi
 from .kb_local_sync import execute_local_directory_sync
 from .kb_notion_sync import execute_notion_sync
 from .kb_resource_store import ensure_base_exists, load_base
-from .kb_runtime import KB_READ_PERMISSION, KB_WRITE_PERMISSION, db, storage
+from .kb_runtime import KB_READ_PERMISSION, KB_WRITE_PERMISSION, db, logger, storage
 from .kb_schemas import CreateConnectorRequest, RunConnectorRequest, UpdateConnectorRequest
 from .kb_sql_sync import execute_sql_sync
 from .kb_url_sync import execute_url_sync
 
 
 router = APIRouter()
+_CONNECTOR_SCHEDULER_RECONCILE = lambda: None
 
 
 def _serialize_connector(row: dict[str, Any]) -> dict[str, Any]:
@@ -72,6 +73,33 @@ def _schedule_payload(schedule: Any) -> tuple[bool, int | None, datetime | None]
     enabled = bool(getattr(schedule, "enabled", False))
     interval_minutes = int(getattr(schedule, "interval_minutes", 0) or 0) or None
     return enabled, interval_minutes, (datetime.now(timezone.utc) if enabled and interval_minutes is not None else None)
+
+
+def set_connector_scheduler_reconciler(callback) -> None:
+    global _CONNECTOR_SCHEDULER_RECONCILE
+    _CONNECTOR_SCHEDULER_RECONCILE = callback or (lambda: None)
+
+
+def _notify_connector_scheduler() -> None:
+    try:
+        _CONNECTOR_SCHEDULER_RECONCILE()
+    except Exception:
+        logger.exception("kb connector scheduler reconcile callback failed")
+
+
+def has_active_scheduled_connectors() -> bool:
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total_count
+                FROM kb_connectors
+                WHERE status = 'active'
+                  AND schedule_enabled = TRUE
+                """
+            )
+            row = cur.fetchone() or {}
+    return int(row.get("total_count") or 0) > 0
 
 
 def _load_connector(connector_id: str, *, user: CurrentUser, request: Request | None = None, action: str = "kb.connector.get") -> dict[str, Any]:
@@ -210,6 +238,7 @@ def _finish_run_record(run_id: str, *, connector: dict[str, Any], result: dict[s
                 ),
             )
         conn.commit()
+    _notify_connector_scheduler()
 
 
 @router.get("/api/v1/kb/connectors")
@@ -280,6 +309,7 @@ def create_connector(payload: CreateConnectorRequest, request: Request, user: Cu
                 ),
             )
         conn.commit()
+    _notify_connector_scheduler()
     connector = _load_connector(connector_id, user=user, request=request, action="kb.connector.get")
     audit_event(
         action="kb.connector.create",
@@ -338,6 +368,7 @@ def update_connector(connector_id: str, payload: UpdateConnectorRequest, request
                 ),
             )
         conn.commit()
+    _notify_connector_scheduler()
     audit_event(
         action="kb.connector.update",
         outcome="success",
@@ -358,6 +389,7 @@ def delete_connector(connector_id: str, request: Request, user: CurrentUser) -> 
         with conn.cursor() as cur:
             cur.execute("DELETE FROM kb_connectors WHERE id = %s", (connector_id,))
         conn.commit()
+    _notify_connector_scheduler()
     audit_event(
         action="kb.connector.delete",
         outcome="success",
@@ -431,7 +463,22 @@ def run_connector(connector_id: str, payload: RunConnectorRequest, request: Requ
 @router.post("/api/v1/kb/connectors/run-due")
 def run_due_connectors(payload: RunConnectorRequest, request: Request, user: CurrentUser) -> dict[str, Any]:
     require_kb_permission(request, user, KB_WRITE_PERMISSION, action="kb.connector.run_due", resource_type="connector")
-    limit = int(payload.limit or 10)
+    result = run_due_connectors_batch(limit=int(payload.limit or 10), dry_run=payload.dry_run, user=user)
+    audit_event(
+        action="kb.connector.run_due",
+        outcome="success",
+        request=request,
+        user=user,
+        resource_type="connector",
+        resource_id="",
+        scope="owner",
+        details={"connector_count": len(result.get("items") or []), "dry_run": payload.dry_run},
+    )
+    return result
+
+
+def run_due_connectors_batch(*, limit: int, dry_run: bool, user: CurrentUser) -> dict[str, Any]:
+    limit = int(limit or 10)
     clauses = [
         "status = 'active'",
         "schedule_enabled = TRUE",
@@ -458,23 +505,13 @@ def run_due_connectors(payload: RunConnectorRequest, request: Request, user: Cur
             connectors = cur.fetchall()
     results = []
     for connector in connectors:
-        run_id = _create_run_record(connector, user=user, dry_run=payload.dry_run)
+        run_id = _create_run_record(connector, user=user, dry_run=dry_run)
         try:
-            result = _execute_connector(connector, user=user, dry_run=payload.dry_run)
+            result = _execute_connector(connector, user=user, dry_run=dry_run)
         except Exception as exc:
             _finish_run_record(run_id, connector=connector, result=None, error_message=str(exc))
             results.append({"connector_id": str(connector.get("id") or ""), "run_id": run_id, "status": "failed", "error": str(exc)})
             continue
         _finish_run_record(run_id, connector=connector, result=result)
         results.append({"connector_id": str(connector.get("id") or ""), "run_id": run_id, "status": "done", "result": result})
-    audit_event(
-        action="kb.connector.run_due",
-        outcome="success",
-        request=request,
-        user=user,
-        resource_type="connector",
-        resource_id="",
-        scope="owner",
-        details={"connector_count": len(results), "dry_run": payload.dry_run},
-    )
     return {"items": results, "count": len(results)}

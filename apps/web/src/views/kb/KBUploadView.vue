@@ -43,6 +43,62 @@
                 size="small"
               />
             </el-form-item>
+            <el-divider content-position="left">版本治理（可选）</el-divider>
+            <el-form-item label="版本家族 Key">
+              <el-input
+                v-model="uploadForm.version_family_key"
+                placeholder="例如：expense-policy"
+                size="small"
+              />
+            </el-form-item>
+            <el-form-item label="版本标签">
+              <el-input
+                v-model="uploadForm.version_label"
+                placeholder="例如：2026-Q1 / v2"
+                size="small"
+              />
+            </el-form-item>
+            <el-form-item label="版本号">
+              <el-input-number v-model="uploadForm.version_number" :min="1" :max="100000" style="width: 100%" />
+            </el-form-item>
+            <el-form-item label="版本状态">
+              <el-select v-model="uploadForm.version_status" size="small" style="width: 100%">
+                <el-option label="active" value="active" />
+                <el-option label="draft" value="draft" />
+                <el-option label="superseded" value="superseded" />
+                <el-option label="archived" value="archived" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="设为当前版本">
+              <el-switch v-model="uploadForm.is_current_version" />
+            </el-form-item>
+            <el-form-item label="生效开始">
+              <el-date-picker
+                v-model="uploadForm.effective_from"
+                type="datetime"
+                value-format="YYYY-MM-DDTHH:mm:ss[Z]"
+                placeholder="可选"
+                size="small"
+                style="width: 100%"
+              />
+            </el-form-item>
+            <el-form-item label="生效结束">
+              <el-date-picker
+                v-model="uploadForm.effective_to"
+                type="datetime"
+                value-format="YYYY-MM-DDTHH:mm:ss[Z]"
+                placeholder="可选"
+                size="small"
+                style="width: 100%"
+              />
+            </el-form-item>
+            <el-form-item label="替代旧文档 ID">
+              <el-input
+                v-model="uploadForm.supersedes_document_id"
+                placeholder="可选，导入新版本时填写"
+                size="small"
+              />
+            </el-form-item>
           </el-form>
 
           <div
@@ -229,7 +285,15 @@ const baseForm = reactive({
 });
 
 const uploadForm = reactive({
-  category: ''
+  category: '',
+  version_family_key: '',
+  version_label: '',
+  version_number: 1,
+  version_status: 'active',
+  is_current_version: true,
+  effective_from: '',
+  effective_to: '',
+  supersedes_document_id: ''
 });
 
 const fileFingerprint = (file: File) => `${file.name}:${file.size}:${file.lastModified}`;
@@ -410,7 +474,15 @@ const uploadSingleFile = async (file: File) => {
             file_name: file.name,
             file_type: file.name.split('.').pop()?.toLowerCase() || 'txt',
             size_bytes: file.size,
-            category: uploadForm.category.trim()
+            category: uploadForm.category.trim(),
+            version_family_key: uploadForm.version_family_key.trim() || undefined,
+            version_label: uploadForm.version_label.trim() || undefined,
+            version_number: Number(uploadForm.version_number || 1),
+            version_status: uploadForm.version_status || undefined,
+            is_current_version: uploadForm.is_current_version,
+            effective_from: uploadForm.effective_from || null,
+            effective_to: uploadForm.effective_to || null,
+            supersedes_document_id: uploadForm.supersedes_document_id.trim() || null
           },
           { idempotencyKey: createKey }
         ) as Promise<any>,

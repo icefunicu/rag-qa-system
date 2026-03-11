@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -14,6 +15,16 @@ ALLOWED_CONNECTOR_TYPES = {
     "web_crawler",
     "sql_query",
 }
+ALLOWED_DOCUMENT_VERSION_STATUSES = {"active", "draft", "superseded", "archived"}
+
+
+def _normalize_optional_text(value: str | None, *, field_name: str, allow_blank: bool = False) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized and not allow_blank:
+        raise ValueError(f"{field_name} must not be blank")
+    return normalized
 
 
 class CreateBaseRequest(BaseModel):
@@ -34,6 +45,14 @@ class CreateUploadRequest(BaseModel):
     file_type: str = Field(min_length=1, max_length=16)
     size_bytes: int = Field(gt=0)
     category: str = Field(default="", max_length=120)
+    version_family_key: str | None = Field(default=None, max_length=160)
+    version_label: str | None = Field(default=None, max_length=64)
+    version_number: int | None = Field(default=None, ge=1, le=100000)
+    version_status: str | None = Field(default=None, max_length=32)
+    is_current_version: bool | None = None
+    effective_from: datetime | None = None
+    effective_to: datetime | None = None
+    supersedes_document_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("file_type")
     @classmethod
@@ -42,6 +61,39 @@ class CreateUploadRequest(BaseModel):
         if normalized not in ALLOWED_KB_FILE_TYPES:
             raise ValueError(f"unsupported kb file type: {normalized}")
         return normalized
+
+    @field_validator("version_family_key")
+    @classmethod
+    def normalize_version_family_key(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value, field_name="version_family_key")
+
+    @field_validator("version_label")
+    @classmethod
+    def normalize_version_label(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value, field_name="version_label")
+
+    @field_validator("version_status")
+    @classmethod
+    def validate_version_status(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(_normalize_optional_text(value, field_name="version_status") or "").lower()
+        if normalized not in ALLOWED_DOCUMENT_VERSION_STATUSES:
+            raise ValueError(f"unsupported version status: {normalized}")
+        return normalized
+
+    @field_validator("supersedes_document_id")
+    @classmethod
+    def normalize_supersedes_document_id(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value, field_name="supersedes_document_id")
+
+    @model_validator(mode="after")
+    def validate_version_window(self):
+        if self.effective_from and self.effective_to and self.effective_to < self.effective_from:
+            raise ValueError("effective_to must be greater than or equal to effective_from")
+        if self.is_current_version and self.version_status and self.version_status != "active":
+            raise ValueError("current version must use active status")
+        return self
 
 
 class PresignPartsRequest(BaseModel):
@@ -80,6 +132,47 @@ class KBQueryRequest(BaseModel):
 class UpdateDocumentRequest(BaseModel):
     file_name: str | None = Field(default=None, min_length=1, max_length=255)
     category: str | None = Field(default=None, max_length=120)
+    version_family_key: str | None = Field(default=None, max_length=160)
+    version_label: str | None = Field(default=None, max_length=64)
+    version_number: int | None = Field(default=None, ge=1, le=100000)
+    version_status: str | None = Field(default=None, max_length=32)
+    is_current_version: bool | None = None
+    effective_from: datetime | None = None
+    effective_to: datetime | None = None
+    supersedes_document_id: str | None = Field(default=None, max_length=64)
+
+    @field_validator("version_family_key")
+    @classmethod
+    def normalize_optional_version_family_key(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value, field_name="version_family_key")
+
+    @field_validator("version_label")
+    @classmethod
+    def normalize_optional_version_label(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value, field_name="version_label")
+
+    @field_validator("version_status")
+    @classmethod
+    def validate_optional_version_status(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(_normalize_optional_text(value, field_name="version_status") or "").lower()
+        if normalized not in ALLOWED_DOCUMENT_VERSION_STATUSES:
+            raise ValueError(f"unsupported version status: {normalized}")
+        return normalized
+
+    @field_validator("supersedes_document_id")
+    @classmethod
+    def normalize_optional_supersedes_document_id(cls, value: str | None) -> str | None:
+        return _normalize_optional_text(value, field_name="supersedes_document_id")
+
+    @model_validator(mode="after")
+    def validate_document_version_window(self):
+        if self.effective_from and self.effective_to and self.effective_to < self.effective_from:
+            raise ValueError("effective_to must be greater than or equal to effective_from")
+        if self.is_current_version and self.version_status and self.version_status != "active":
+            raise ValueError("current version must use active status")
+        return self
 
 
 class UpdateChunkRequest(BaseModel):

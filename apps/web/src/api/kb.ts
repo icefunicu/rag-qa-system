@@ -34,7 +34,34 @@ export function getKBDocument(documentId: string) {
   return request.get(`/kb/documents/${documentId}`);
 }
 
-export function updateKBDocument(documentId: string, data: { file_name?: string; category?: string }) {
+export function getKBDocumentVersions(documentId: string) {
+  return request.get(`/kb/documents/${documentId}/versions`);
+}
+
+export function getKBDocumentVersionContent(documentId: string, versionId: string, includeDisabled: boolean = true) {
+  return request.get(`/kb/documents/${documentId}/versions/${versionId}/content`, {
+    params: { include_disabled: includeDisabled }
+  });
+}
+
+export function getKBDocumentVersionDiff(documentId: string, versionId: string, compareToDocumentId?: string) {
+  return request.get(`/kb/documents/${documentId}/versions/${versionId}/diff`, {
+    params: { compare_to_document_id: compareToDocumentId || '' }
+  });
+}
+
+export function updateKBDocument(documentId: string, data: {
+  file_name?: string;
+  category?: string;
+  version_family_key?: string;
+  version_label?: string;
+  version_number?: number;
+  version_status?: string;
+  is_current_version?: boolean;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  supersedes_document_id?: string | null;
+}) {
   return request.patch(`/kb/documents/${documentId}`, data);
 }
 
@@ -56,6 +83,14 @@ export function createKBUpload(data: {
   file_type: string;
   size_bytes: number;
   category?: string;
+  version_family_key?: string;
+  version_label?: string;
+  version_number?: number;
+  version_status?: string;
+  is_current_version?: boolean;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  supersedes_document_id?: string | null;
 }, options: { idempotencyKey?: string } = {}) {
   return request.post('/kb/uploads', data, {
     headers: {

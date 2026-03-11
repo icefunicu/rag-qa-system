@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, Request
@@ -8,7 +9,7 @@ from shared.auth import CurrentUser
 
 from .db import to_json
 from .kb_api_support import audit_event, begin_idempotency, complete_idempotency, fail_idempotency, require_kb_permission
-from .kb_resource_store import ensure_base_exists
+from .kb_resource_store import ensure_base_exists, load_document
 from .kb_runtime import (
     DEFAULT_INGEST_MAX_ATTEMPTS,
     KB_READ_PERMISSION,
@@ -45,6 +46,14 @@ def create_upload(payload: CreateUploadRequest, request: Request, user: CurrentU
             "file_type": payload.file_type,
             "size_bytes": payload.size_bytes,
             "category": payload.category,
+            "version_family_key": payload.version_family_key,
+            "version_label": payload.version_label,
+            "version_number": payload.version_number,
+            "version_status": payload.version_status,
+            "is_current_version": payload.is_current_version,
+            "effective_from": payload.effective_from.isoformat() if payload.effective_from else "",
+            "effective_to": payload.effective_to.isoformat() if payload.effective_to else "",
+            "supersedes_document_id": payload.supersedes_document_id,
         },
     )
     if state.replay_payload is not None:
@@ -54,6 +63,12 @@ def create_upload(payload: CreateUploadRequest, request: Request, user: CurrentU
         if file_type not in ALLOWED_KB_FILE_TYPES:
             raise_api_error(400, "unsupported_file_type", f"unsupported kb file type: {file_type}")
         ensure_base_exists(payload.base_id, user=user, request=request, action="kb.upload.create")
+        if payload.is_current_version and payload.effective_from and payload.effective_from > datetime.now(timezone.utc):
+            raise_api_error(400, "document_version_current_future_effective", "future-effective version cannot be marked current yet")
+        if payload.supersedes_document_id:
+            superseded = load_document(payload.supersedes_document_id, user=user, request=request, action="kb.upload.create")
+            if str(superseded.get("base_id") or "") != payload.base_id:
+                raise_api_error(400, "document_version_cross_base", "superseded document must belong to the same knowledge base")
         upload_id = str(uuid4())
         storage_key = storage.build_storage_key(service="kb", document_id=upload_id, file_name=payload.file_name)
         s3_upload_id = storage.create_multipart_upload(
@@ -66,11 +81,14 @@ def create_upload(payload: CreateUploadRequest, request: Request, user: CurrentU
                     """
                     INSERT INTO kb_upload_sessions (
                         id, base_id, file_name, file_type, size_bytes, category,
-                        storage_key, s3_upload_id, status, created_by, expires_at
+                        storage_key, s3_upload_id, status, created_by, expires_at,
+                        version_family_key, version_label, version_number, version_status,
+                        is_current_version, effective_from, effective_to, supersedes_document_id
                     )
                     VALUES (
                         %s, %s, %s, %s, %s, %s,
-                        %s, %s, 'pending_upload', %s, NOW() + INTERVAL '1 hour'
+                        %s, %s, 'pending_upload', %s, NOW() + INTERVAL '1 hour',
+                        %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     """,
                     (
@@ -83,6 +101,14 @@ def create_upload(payload: CreateUploadRequest, request: Request, user: CurrentU
                         storage_key,
                         s3_upload_id,
                         user.user_id,
+                        payload.version_family_key or "",
+                        payload.version_label or "",
+                        payload.version_number,
+                        payload.version_status or "",
+                        payload.is_current_version,
+                        payload.effective_from,
+                        payload.effective_to,
+                        payload.supersedes_document_id,
                     ),
                 )
             conn.commit()
@@ -172,18 +198,59 @@ def complete_upload(upload_id: str, payload: CompleteUploadRequest, request: Req
         object_meta = storage.stat_object(str(session["storage_key"]))
         document_id = str(uuid4())
         job_id = str(uuid4())
+        supersedes_document_id = str(session.get("supersedes_document_id") or "") or None
+        if supersedes_document_id:
+            superseded = load_document(supersedes_document_id, user=user, request=request, action="kb.upload.complete")
+            if str(superseded.get("base_id") or "") != str(session.get("base_id") or ""):
+                raise_api_error(400, "document_version_cross_base", "superseded document must belong to the same knowledge base")
+            version_family_key = str(session.get("version_family_key") or superseded.get("version_family_key") or superseded["id"])
+            version_number = int(session.get("version_number") or (int(superseded.get("version_number") or 1) + 1))
+        else:
+            version_family_key = str(session.get("version_family_key") or document_id)
+            version_number = int(session.get("version_number") or 1)
+        version_label = str(session.get("version_label") or "") or f"v{version_number}"
+        version_status = str(session.get("version_status") or "") or "active"
+        effective_from = session.get("effective_from")
+        is_current_version = session.get("is_current_version")
+        if is_current_version is None:
+            is_current_version = version_status == "active" and not (
+                isinstance(effective_from, datetime) and effective_from > datetime.now(timezone.utc)
+            )
+        if bool(is_current_version) and version_status != "active":
+            raise_api_error(400, "document_version_current_requires_active", "current version must use active status")
+        if bool(is_current_version) and isinstance(effective_from, datetime) and effective_from > datetime.now(timezone.utc):
+            raise_api_error(400, "document_version_current_future_effective", "future-effective version cannot be marked current yet")
         with db.connect() as conn:
             with conn.cursor() as cur:
+                if bool(is_current_version):
+                    cur.execute(
+                        """
+                        UPDATE kb_documents
+                        SET is_current_version = FALSE,
+                            version_status = CASE
+                                WHEN version_status = 'active' THEN 'superseded'
+                                ELSE version_status
+                            END,
+                            updated_at = NOW()
+                        WHERE base_id = %s
+                          AND version_family_key = %s
+                          AND is_current_version = TRUE
+                        """,
+                        (session["base_id"], version_family_key),
+                    )
                 cur.execute(
                     """
                     INSERT INTO kb_documents (
                         id, base_id, file_name, file_type, content_hash, storage_path,
                         storage_key, size_bytes, status, query_ready, enhancement_status,
-                        created_by, stats_json, upload_session_id
+                        created_by, stats_json, upload_session_id,
+                        version_family_key, version_label, version_number, version_status,
+                        is_current_version, effective_from, effective_to, supersedes_document_id
                     )
                     VALUES (
                         %s, %s, %s, %s, %s, %s,
-                        %s, %s, 'uploaded', FALSE, '', %s, %s::jsonb, %s
+                        %s, %s, 'uploaded', FALSE, '', %s, %s::jsonb, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     """,
                     (
@@ -198,6 +265,14 @@ def complete_upload(upload_id: str, payload: CompleteUploadRequest, request: Req
                         user.user_id,
                         to_json({"category": session.get("category", "")}),
                         upload_id,
+                        version_family_key,
+                        version_label,
+                        version_number,
+                        version_status,
+                        bool(is_current_version),
+                        effective_from,
+                        session.get("effective_to"),
+                        supersedes_document_id,
                     ),
                 )
                 cur.execute(

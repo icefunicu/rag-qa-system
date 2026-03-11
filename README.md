@@ -559,6 +559,32 @@ LLM_API_KEY=your-llm-api-key
 LLM_MODEL=qwen3.5-plus
 ```
 
+### Vercel 展示型 `.env` 模板
+
+仓库新增了 [`.env.vercel.example`](/E:/Project/rag-qa-system/.env.vercel.example)。
+
+这份模板只用于技术展示和部署补全，不用于真实生效的生产发布。约束如下：
+
+- `Vercel` 场景下默认走远端 `Gateway`，前端使用 `--mode vercel` 构建
+- `LLM`、`Embedding`、`Rerank`、`OCR`、对象存储、向量库、数据库都使用第三方或托管资源占位值
+- 不包含真实密钥，也不会替代正式的生产发布配置
+
+对应的展示型 CI 在 [`.github/workflows/vercel-showcase.yml`](/E:/Project/rag-qa-system/.github/workflows/vercel-showcase.yml)：
+
+- 只校验 `Vercel` 专用环境模板是否满足“全部走第三方资源”的约束
+- 只执行前端 `vercel mode` 构建并上传产物
+- 不会调用真实 `vercel deploy`，也不会创建真实部署
+
+本地验证命令：
+
+```powershell
+python scripts/quality/check-vercel-env.py .env.vercel.example
+Copy-Item .env.vercel.example .env.vercel
+cd apps/web
+npm ci
+npm run build -- --mode vercel
+```
+
 ### 连接器相关配置怎么写
 
 如果你要启用企业文档同步，建议把下面这些变量也补上：
@@ -644,6 +670,49 @@ KB_LOCAL_CONNECTOR_MAX_FILES=256
 - 大目录第一次很容易误扫过多文档，所以需要上限保护
 - 先从小目录开始，可以更快完成首轮 ingest、调试 chunk 质量和纠正错误分类
 
+目录里应该放什么：
+
+- 推荐放业务原始文档或整理后的正式资料，例如制度说明、SOP、FAQ、产品手册、合同模板、会议纪要整理稿
+- 当前支持的文件格式是 `txt`、`pdf`、`docx`、`png`、`jpg`、`jpeg`
+- 如果是图片类文档，建议一张图片只表达一个主题，避免整批截图拼在一个文件里
+- 如果是扫描件，建议先保证文字方向正确、内容清晰，避免 OCR 质量过低
+
+目录里不建议放什么：
+
+- Office 临时文件，例如 `~$xxx.docx`
+- 下载中的半成品文件、缓存文件、`.tmp` 文件
+- 压缩包、安装包、数据库导出、代码仓库、日志目录这类不适合作为知识库语料的内容
+- 与业务问答无关的截图、表情包、宣传海报、重复导出的同一份资料
+
+推荐摆放方式：
+
+- 一个一级目录对应一个业务域，例如 `hr`、`finance`、`legal`
+- 一个子目录对应一个主题或一类资料，例如 `制度`、`流程`、`模板`
+- 同一份文档如果有历史版本，建议放在单独的 `archive`、`history` 或按日期分目录，避免新旧版本混在一起难治理
+- 文件名尽量稳定且带业务语义，例如 `员工手册-v2026-03.docx`，不要长期使用 `新建文档(3).docx`
+
+推荐目录结构示例：
+
+```text
+E:\corp-docs
+├─ hr
+│  ├─ policy
+│  │  ├─ 员工手册-v2026-03.docx
+│  │  └─ 请假制度-v2026-02.pdf
+│  ├─ faq
+│  │  └─ 社保公积金常见问题.txt
+│  └─ archive
+│     └─ 员工手册-v2025-12.docx
+├─ finance
+│  ├─ reimbursement
+│  │  └─ 报销制度-v2026-01.pdf
+│  └─ template
+│     └─ 差旅报销模板.docx
+└─ legal
+   └─ contract
+      └─ 标准采购合同模板.docx
+```
+
 接口请求体里最重要的字段：
 
 - `source_path`
@@ -667,6 +736,11 @@ KB_LOCAL_CONNECTOR_MAX_FILES=256
   建议映射成业务标签，例如 `hr-policy`、`finance-faq`、`legal-contract`
 
 #### 2. Notion 连接器要怎么配置
+
+官方入口：
+
+- Notion Developers：<https://developers.notion.com/>
+- Notion 帮助文档（连接 API / 授权页面）：<https://www.notion.so/help/add-and-manage-connections-with-the-api>
 
 核心环境变量：
 
@@ -700,6 +774,25 @@ KB_NOTION_CONNECTOR_MAX_PAGES=32
 - `KB_NOTION_CONNECTOR_MAX_PAGES`
   控制单次同步最多拉取多少个页面，避免一次导入过大
 
+按步骤配置 Notion 连接器：
+
+1. 打开 Notion 官方开发者网站 `<https://developers.notion.com/>`
+2. 创建一个 integration，填写名称，选择要接入的 workspace
+3. 创建完成后复制 `Internal Integration Token`
+4. 把 token 配到后端 `.env` 中，例如：
+
+```env
+KB_NOTION_CONNECTOR_ENABLED=true
+KB_NOTION_API_TOKEN=secret_xxx
+```
+
+5. 打开你要同步的 Notion 页面
+6. 在 Notion 页面右上角点击 `Share`
+7. 在分享面板里找到 `Connections` 或 “连接到”，把刚才创建的 integration 加进去
+8. 确认这个 integration 已经拿到该页面的访问权限；如果没有共享成功，即使 token 正确，同步也会失败
+9. 复制页面 URL，从 URL 中提取 `page_id`
+10. 先用 1 到 3 个页面做小范围测试，再逐步扩大同步范围
+
 为什么这么配：
 
 - Notion 是受权限控制的，只有 integration 被授权到的页面才能读取
@@ -719,6 +812,12 @@ KB_NOTION_CONNECTOR_MAX_PAGES=32
 - 从 Notion 页面 URL 中提取 page id
 - page id 本质上是 32 位十六进制字符串
 - 如果 URL 中带短横线，服务端会做标准化，但你仍然应该尽量传完整 page id
+
+URL 示例：
+
+- 页面 URL 可能类似：`https://www.notion.so/acme/AI-FAQ-2f8c6e8c0f2b4e08a9f0e9d6d7d4a123`
+- 其中最后这一段里的 `2f8c6e8c0f2b4e08a9f0e9d6d7d4a123` 就是可用的 page id
+- 有些 URL 会写成带短横线的形式，例如 `2f8c6e8c-0f2b-4e08-a9f0-e9d6d7d4a123`，也同样可以使用
 
 为什么当前只传 `page_ids`，不支持“整个空间自动扫库”：
 
@@ -852,7 +951,9 @@ REPORTING_DB_DSN=postgresql://user:password@host:5432/reporting
 
 1. 先在后端 `.env` 里配置 `KB_LOCAL_CONNECTOR_ROOTS`
 2. 确保要同步的目录位于白名单根目录内
-3. 调用同步接口，把目录里的文档批量导入指定知识库
+3. 先把要导入的业务资料按主题放进明确子目录，不要直接把整个共享盘根目录丢进去
+4. 第一次建议只选一个小目录，并把 `dry_run` 设成 `true`
+5. 确认返回结果没有误扫后，再正式调用同步接口把文档批量导入指定知识库
 
 最小示例：
 
@@ -879,6 +980,14 @@ curl -X POST http://localhost:8300/api/v1/kb/connectors/local-directory/sync \
 - `ignored_files`
 
 如果你只是先预览会改动什么，把 `dry_run` 改成 `true`。
+
+首次落地建议：
+
+1. 先准备一个很小的试点目录，例如 `E:\corp-docs\hr\policy`
+2. 放 3 到 10 份代表性文档，优先选择后续会被频繁问到的制度、流程、FAQ
+3. 不要把历史归档、重复副本、临时草稿一开始就混进来
+4. 先跑一次 `dry_run=true`，确认 `ignored_files` 和 `counts.*` 是否符合预期
+5. 结果正常后，再扩大到更多目录
 
 配置字段说明：
 
@@ -919,10 +1028,13 @@ curl -X POST http://localhost:8300/api/v1/kb/connectors/local-directory/sync \
 
 怎么用：
 
-1. 在 Notion 创建一个 integration，并让目标页面授权给这个 integration
-2. 在后端 `.env` 里配置 `KB_NOTION_CONNECTOR_ENABLED=true`
-3. 配置 `KB_NOTION_API_TOKEN`
-4. 从页面 URL 中取出 page id，调用同步接口
+1. 访问 Notion 官方开发者站点：<https://developers.notion.com/>
+2. 创建 integration，并记录 `Internal Integration Token`
+3. 在后端 `.env` 里配置 `KB_NOTION_CONNECTOR_ENABLED=true` 和 `KB_NOTION_API_TOKEN`
+4. 打开要同步的页面，在 `Share` 中把该页面授权给这个 integration
+5. 从页面 URL 中取出 `page_id`
+6. 第一次先同步少量页面，并建议先把 `dry_run` 设成 `true`
+7. 确认结果正确后，再改成正式同步
 
 最小示例：
 
@@ -945,6 +1057,7 @@ curl -X POST http://localhost:8300/api/v1/kb/connectors/notion/sync \
 - `page_ids` 只支持明确指定页面，不会自动扫描整个工作区
 - 同步时会把页面内容转成 UTF-8 文本，再进入统一 ingest 流程
 - 如果 Notion 页面后来更新，再次调用同步接口即可增量更新知识库文档
+- 如果页面没有共享给对应的 integration，常见现象是同步失败、拿不到内容，或者页面被判定无权限
 
 配置字段说明：
 
