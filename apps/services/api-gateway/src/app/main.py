@@ -20,8 +20,10 @@ from .gateway_admin_routes import router as gateway_admin_router
 from .gateway_analytics_routes import router as gateway_analytics_router
 from .gateway_audit_support import merge_audit_event_lists as _merge_audit_event_lists
 from .gateway_auth_routes import router as gateway_auth_router
+from .gateway_chat_graph_routes import router as gateway_chat_graph_router
 from .gateway_chat_routes import router as gateway_chat_router
 from .gateway_config import load_gateway_runtime_settings
+from .gateway_graph import ensure_gateway_graph_schema
 from .gateway_idempotency import IdempotencyState
 from .gateway_pricing import estimate_usage_cost
 from .gateway_runtime import gateway_db, logger, runtime_settings
@@ -42,6 +44,7 @@ async def lifespan(_: FastAPI):
     warnings = ensure_auth_configuration_ready()
     for warning in warnings:
         logger.warning("gateway auth configuration warning: %s", warning)
+    ensure_gateway_graph_schema()
     yield
 
 
@@ -146,6 +149,7 @@ async def _gateway_readiness_checks() -> dict[str, Any]:
 app.include_router(gateway_auth_router)
 app.include_router(gateway_system_router)
 app.include_router(gateway_chat_router)
+app.include_router(gateway_chat_graph_router)
 app.include_router(gateway_admin_router)
 app.include_router(gateway_platform_router)
 app.include_router(gateway_analytics_router)

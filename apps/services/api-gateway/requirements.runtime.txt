@@ -1,6 +1,8 @@
 fastapi==0.115.8
 httpx==0.28.1
 langchain-core==0.3.83
+langgraph==0.5.4
+langgraph-checkpoint-postgres==2.0.25
 langchain-openai==0.3.35
 prometheus-client==0.21.1
 psycopg[binary]==3.2.5

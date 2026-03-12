@@ -1338,6 +1338,149 @@ curl -X POST http://localhost:8300/api/v1/kb/connectors \
 
 - `grounded`：严格基于当前作用域检索结果作答
 - `agent`：在统一聊天入口里走更复杂的内部编排，但最终仍然要求 grounded answer
+- `v2`：新增基于 LangGraph 的 `thread / run / interrupt` 运行时，支持 checkpoint 恢复、人工澄清（HITL）、`step_events` 与 `verification` 元数据
+
+当前新增的 `v2` 入口：
+
+- `POST /api/v2/chat/threads`
+- `POST /api/v2/chat/threads/{thread_id}/runs`
+- `POST /api/v2/chat/runs/{run_id}/resume`
+- `POST /api/v2/chat/interrupts/{interrupt_id}/submit`
+
+运行时依赖基线：
+
+- `api-gateway`：`langgraph==0.5.4`，`langgraph-checkpoint-postgres==2.0.25`
+- `knowledge-base`：`langgraph==0.5.4`
+- 若 `langgraph < 0.5`，`langgraph-checkpoint-postgres` 会发出兼容性 `DeprecationWarning`
+
+#### 为什么这次要把编排层改成 LangGraph
+
+这次升级的重点，不是把整个 LangChain 生态从仓库里删除，而是把“编排职责”从分散的 service 逻辑和轻量链式调用里抽出来，交给 LangGraph 做显式状态管理。
+
+在旧的实现里，聊天请求虽然已经具备检索、生成、重试、审计这些能力，但主流程更多依赖命令式函数推进。这样的实现对 happy path 足够直接，但一旦要支持人工澄清、可恢复执行、节点级追踪、运行中断、幂等 resume，就会出现几个典型问题：
+
+1. 状态分散。一次问答的输入、检索结果、生成结果、校验信息和恢复点会散落在多个函数返回值与持久化结构里，后续排障时很难回答“这次 run 现在到底卡在哪个阶段”。
+2. 中断不自然。命令式编排可以人为塞一个 `if need_human_review` 分支，但很难把“暂停并等待外部提交”做成统一机制，更难把它和恢复逻辑、幂等逻辑、审计逻辑对齐。
+3. 节点边界不清楚。旧模式下更像是“几个大函数串起来”，测试往往只能测整条链，很难把准备阶段、生成阶段、持久化阶段分别验证。
+4. 恢复语义不稳定。以前的恢复更偏向“从某个业务 checkpoint 再试一次”，现在则需要更严格的 run 级恢复，即恢复到图的哪个节点、恢复后继续走哪条边，都要有统一语义。
+
+因此，这次调整的本质是：
+
+1. 保留 LangChain 生态里仍然有价值的底层抽象，例如 `Document`、retriever、LLM 调用与共享工具能力。
+2. 清掉查询面上“由业务函数自己顺手编排状态机”的模式，让 LangGraph 接管节点、边、checkpoint 与 interrupt。
+3. 把 Gateway 和 KB 都改成“状态显式、节点可追踪、失败可恢复、边界可测试”的图运行时。
+
+#### Gateway 的 LangGraph 节点是怎么拆的
+
+Gateway 当前的聊天图定义在 `apps/services/api-gateway/src/app/gateway_graph.py`，入口是 `prepare_turn`，结束于 `persist_turn`。这张图不是为了把业务写得更花哨，而是为了把一次问答拆成四个职责稳定的阶段。
+
+| 节点 | 做什么 | 为什么必须单独成节点 |
+| --- | --- | --- |
+| `prepare_turn` | 读取会话、规范化请求、解析作用域、拉最近历史、执行检索准备、判断 answer mode，并在必要时构造 `human_review` 载荷 | 这是整条链里最容易分叉的阶段。是否证据不足、是否 scope 为空、是否需要人工澄清，都在这里统一收口 |
+| `human_review_turn` | 调用 LangGraph 的 `interrupt(...)` 暂停运行，把结构化澄清问题交给外部；恢复后把人工提交的内容重新写回 payload | 这个节点把“暂停”和“恢复”变成图层级能力，而不是业务层额外维护的一套等待状态 |
+| `generate_answer` | 基于已经准备好的上下文调用生成逻辑，产出答案、引用、延迟、verification 信息 | 生成阶段单独隔离后，可以明确回答“是检索准备阶段失败，还是生成阶段失败” |
+| `persist_turn` | 将最终问答结果持久化到消息存储，形成用户可见的聊天消息 | 让持久化只发生在最后稳定阶段，避免半途中断时写出不完整消息 |
+
+把这四个节点连起来后，Gateway 图的控制流非常明确：
+
+1. 先进入 `prepare_turn`。
+2. 如果 `prepare_turn` 发现当前 scope 为空，或者 agent 模式下证据不足且又不允许常识补充，就走到 `human_review_turn`。
+3. 如果没有人工介入需求，就直接走到 `generate_answer`。
+4. 生成完成后进入 `persist_turn`，再结束本轮 run。
+5. 如果中间走了 `human_review_turn`，在用户提交澄清结果后，图会回到 `prepare_turn` 重新准备，而不是在旧上下文上硬接着跑。
+
+这种设计有一个很重要的工程收益：每个节点都只回答一个问题。
+
+1. `prepare_turn` 只负责把“本轮该怎么答”准备清楚。
+2. `human_review_turn` 只负责“是否需要外部人来补充决策”。
+3. `generate_answer` 只负责“把证据组织成回答”。
+4. `persist_turn` 只负责“把已经稳定的结果写进去”。
+
+这样做之后，排障、测试、审计和恢复都不需要再从一大段 if/else 里猜当前阶段。
+
+#### Gateway 图里的状态到底保存了什么
+
+这次改造的另一个关键点，是把过去隐含在局部变量里的运行态显式放进图状态。当前 `ChatGraphState` 里比较关键的字段有：
+
+1. `payload`：本轮原始请求体，也是 resume 后可能被人工改写的问题来源。
+2. `prepared`：准备阶段产物，包括 contextualized question、scope snapshot、history、evidence、answer mode 等。
+3. `human_review`：当前是否挂起人工介入，以及挂起时要展示给外部的结构化说明。
+4. `response_payload`：生成阶段产出的回答、引用、耗时与检索元数据。
+5. `verification`：对回答质量做的轻量校验结果，例如回答里是否真正带了内联引用标记。
+6. `step_events`：每个节点执行完都会追加一条事件，方便上层接口直接把运行轨迹返回给调用方。
+7. `status` 与 `current_node`：让 run 当前所处位置可以被外部直接读到，而不是靠日志猜。
+
+状态显式化的意义在于：图不再只是“跑一下函数”，而是真正拥有可观察的运行上下文。
+
+#### 中断、恢复和投影为什么要拆成两层
+
+当前 Gateway 查询面有两套持久化对象，但它们的角色已经被重新划分：
+
+1. LangGraph checkpoint 是主状态源。也就是说，真正决定“这个 run 现在卡在哪个节点、恢复后从哪继续”的，是 graph checkpoint。
+2. `chat_workflow_runs` 退化为投影层。它继续保留，是为了列表展示、审计查询、运营侧筛选，以及兼容现有 run 查询接口。
+3. `chat_graph_interrupts` 专门记录人工介入请求和回复。它解决的是“挂起时要把什么展示给用户”和“恢复时提交了什么”这两个问题，而不是承担主恢复逻辑。
+
+这样拆的好处是：
+
+1. 恢复语义更清楚。恢复依赖 checkpoint，而不是依赖业务表里某个模糊的 stage 字段。
+2. 审计更稳定。运营要看 run 列表、状态、节点、interrupt 状态，可以直接读投影表，不必碰底层 checkpoint 结构。
+3. 演进空间更大。后续要扩更多节点、更多 interrupt 类型，不需要改动历史 run 的基本查询方式。
+
+#### KB 检索图为什么也要 graph 化
+
+如果只有 Gateway 用 LangGraph，而知识库侧仍然是黑盒函数，那么上层只能知道“我发了一次 retrieve”，却不知道检索内部到底经历了哪些阶段。因此 KB 这次也把 retrieval 编排改成了显式图，定义在 `apps/services/knowledge-base/src/app/retrieve.py`。
+
+当前 KB 检索图的节点虽然只有三个，但边界非常清楚：
+
+| 节点 | 做什么 | 关键价值 |
+| --- | --- | --- |
+| `prepare_request` | 记录开始时间、标准化 `base_id / question / limit`、执行 query rewrite、解析实际可检索的 document ids | 把原始问题和检索问题区分开，保证后续召回链路都基于同一份 rewrite 结果 |
+| `run_signal_retrievers` | 统一执行三类召回：结构检索、全文检索、向量检索，并记录 degraded signals 与 warnings | 让“召回阶段”有独立边界，方便后续继续扩 parallel retriever 或失败降级 |
+| `fuse_and_rerank` | 汇总三路结果，做加权 RRF 融合，再执行 rerank，最后包装成统一 `RetrievalResult` | 让融合与重排成为独立的后处理阶段，而不是混在召回逻辑内部 |
+
+这三个节点背后的设计意图是：
+
+1. 改写问题和执行召回不是一回事。改写是查询理解，召回是取证据。
+2. 三种检索信号虽然都属于 retrieval，但它们在概念上是同一阶段内部的三个子动作，不需要拆成大量细碎节点来增加图噪音。
+3. 融合和重排必须放在召回之后单独表达，因为它决定的是“哪些证据真正进入最终上下文”，这和“召回到了什么”不是同一层含义。
+
+#### KB 图里每一步到底在处理什么
+
+`prepare_request` 处理的是“把一个自然语言问题变成可检索请求”。
+
+1. 它会先做 query rewrite，得到 original query、rewritten query、focus query、rewrite tags、expansion terms。
+2. 它会把 document scope 解析成真正允许参与检索的 `doc_ids`。
+3. 它还会记录开始时间，为后面计算 `retrieval_ms` 提供基线。
+
+`run_signal_retrievers` 处理的是“从不同角度找证据”。
+
+1. 结构检索偏向标题、章节名和结构化命中，适合制度类文档、目录型文档。
+2. 全文检索偏向关键词精确命中，适合专业术语、固定表达、编号条款。
+3. 向量检索偏向语义相似，适合用户提问和原文表达不完全一致的情况。
+
+这一步之所以保留三种信号而不是只留向量检索，是因为企业知识问答里，很多问题不是“语义像就够了”，而是需要同时兼顾标题结构、关键术语和语义相近表达。
+
+`fuse_and_rerank` 处理的是“把候选结果变成最终证据集”。
+
+1. 先把三路召回结果映射成统一的 `EvidenceBlock`。
+2. 再用加权 RRF 做融合，避免单一信号把结果列表完全主导。
+3. 然后把融合后的前部候选送入 rerank。
+4. 最终输出 selected candidates、reranked candidates、degraded signals、warnings、retrieval ms 等调试字段。
+
+所以，KB 图真正解决的问题不是“怎么把三次检索写成三行代码”，而是“怎么让一次 retrieval 过程有清楚的阶段边界和可解释的中间产物”。
+
+#### 为什么这次改造可以算更成熟的 Agent 化 RAG
+
+这里说的“成熟”，不是节点数量越多越成熟，而是系统是否具备下面这些工程特征：
+
+1. 有显式状态。当前 run 的输入、证据、答案、校验、人工介入、当前节点都能直接读到。
+2. 有显式边。准备、人工介入、生成、持久化之间如何流转，不再靠隐式函数调用关系推断。
+3. 有统一恢复点。恢复以 graph checkpoint 为准，不再是“重跑到大概这个阶段”。
+4. 有节点级事件。上层 API 可以返回 `step_events`，前端、审计和测试都能复用。
+5. 有跨服务一致语义。Gateway 和 KB 都开始返回 `graph` 元数据，后续要做统一 trace 和运行轨迹聚合更容易。
+6. 有稳定测试边界。现在可以单独验证 interrupt/resume、retrieval graph、projection 更新，而不必每次都做整链黑盒测试。
+
+如果从工程角度总结，这次不是单纯“接了一个新框架”，而是把查询面从“能跑”升级到“能解释、能恢复、能审计、能演进”。
 
 ### 4. 工作流恢复
 
@@ -1348,6 +1491,7 @@ curl -X POST http://localhost:8300/api/v1/kb/connectors \
 - 失败后查看 `workflow_run`
 - 对失败 run 发起 retry
 - 从 retrieval 或 generation checkpoint 恢复，而不是每次整轮重跑
+- 对于 `v2` LangGraph 运行时，恢复以 graph checkpoint 为主状态源，`workflow_run` 主要承担投影与审计职责
 
 ### 5. Agent 工作台与 Prompt 模板
 
@@ -1747,6 +1891,12 @@ cd apps/web && npm run build
 python -m compileall packages/python apps/services/api-gateway apps/services/knowledge-base
 python -m pytest tests -q
 docker compose config --quiet
+```
+
+LangGraph 运行时的最小回归验证：
+
+```powershell
+pytest -q tests/test_backend_infra.py tests/test_chat_workflow_resume_and_budget.py tests/test_langgraph_runtime.py
 ```
 
 也可以直接运行：

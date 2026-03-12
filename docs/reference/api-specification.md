@@ -81,6 +81,39 @@ Authorization: Bearer <ACCESS_TOKEN>
 
 ## 4. 统一聊天与工作流
 
+### `v2` LangGraph 运行时
+
+新增基于 LangGraph 的 `thread / run / interrupt` 语义：
+
+- `POST /api/v2/chat/threads`
+- `GET /api/v2/chat/threads/{thread_id}`
+- `GET /api/v2/chat/threads/{thread_id}/messages`
+- `POST /api/v2/chat/threads/{thread_id}/runs`
+- `GET /api/v2/chat/runs/{run_id}`
+- `POST /api/v2/chat/runs/{run_id}/resume`
+- `POST /api/v2/chat/interrupts/{interrupt_id}/submit`
+
+`v2` 关键字段：
+
+- `status`
+- `run`
+- `interrupt`
+- `step_events`
+- `verification`
+- `thread_id`
+
+说明：
+
+- `v2` 的 `run` 由 LangGraph checkpoint 驱动，可在 `interrupted` 状态下继续恢复
+- `interrupt` 用于人工澄清和证据不足场景
+- `v1` 的 `workflow_run` 仍保留，但实现上已退化为运行投影/审计视图
+
+运行时依赖基线：
+
+- `api-gateway` 当前固定使用 `langgraph==0.5.4` 与 `langgraph-checkpoint-postgres==2.0.25`
+- `knowledge-base` 当前固定使用 `langgraph==0.5.4`
+- 若部署环境仍使用 `langgraph < 0.5`，`checkpoint-postgres` 会发出兼容性 `DeprecationWarning`
+
 ### `POST /api/v1/chat/sessions`
 
 创建聊天会话。
@@ -359,6 +392,21 @@ SSE 流式回答，事件顺序：
 - `retrieval`
 - `trace_id`
 
+### `POST /api/v2/kb/retrieve`
+
+LangGraph 编排版检索接口。
+
+除 `v1` 字段外，额外返回：
+
+- `graph.engine`
+- `graph.entrypoint`
+- `graph.final_node`
+- `graph.trace_id`
+
+说明：
+
+- 运行时依赖基线与 Gateway `v2` 一致，当前要求 `langgraph==0.5.4`
+
 ### `POST /api/v1/kb/retrieve/debug`
 
 检索调试工作台接口。
@@ -380,6 +428,21 @@ SSE 流式回答，事件顺序：
 - `trace_id`
 
 ### 知识库问答
+
+### `POST /api/v2/kb/query`
+
+LangGraph 编排版知识库问答接口。
+
+除 `v1` 字段外，额外返回：
+
+- `graph.engine`
+- `graph.entrypoint`
+- `graph.final_node`
+- `graph.trace_id`
+
+说明：
+
+- 运行时依赖基线与 Gateway `v2` 一致，当前要求 `langgraph==0.5.4`
 
 - `POST /api/v1/kb/query`
 - `POST /api/v1/kb/query/stream`

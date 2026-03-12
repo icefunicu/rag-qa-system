@@ -25,7 +25,7 @@ from .kb_runtime import (
     KB_SAFETY_EVENTS_TOTAL,
 )
 from .kb_schemas import KBQueryRequest, RetrievalDebugRequest, RetrieveRequest
-from .retrieve import retrieve_kb_result
+from .retrieve import retrieve_kb_result, run_retrieval_graph
 
 
 router = APIRouter()
@@ -51,6 +51,15 @@ def _reject_backpressure(*, request: Request, user: CurrentUser, endpoint: str, 
     )
 
 
+def _graph_meta(*, entrypoint: str, final_node: str) -> dict[str, Any]:
+    return {
+        "engine": "langgraph",
+        "entrypoint": entrypoint,
+        "final_node": final_node,
+        "trace_id": current_trace_id(),
+    }
+
+
 @router.post("/api/v1/kb/retrieve")
 def retrieve_kb(payload: RetrieveRequest, request: Request, user: CurrentUser) -> dict[str, Any]:
     require_kb_permission(request, user, KB_READ_PERMISSION, action="kb.retrieve", resource_type="knowledge_base", resource_id=payload.base_id)
@@ -68,6 +77,30 @@ def retrieve_kb(payload: RetrieveRequest, request: Request, user: CurrentUser) -
         "items": [serialize_evidence(item, corpus_id=f"kb:{payload.base_id}") for item in result.items],
         "retrieval": result.stats.as_dict(),
         "trace_id": current_trace_id(),
+    }
+
+
+@router.post("/api/v2/kb/retrieve")
+def retrieve_kb_v2(payload: RetrieveRequest, request: Request, user: CurrentUser) -> dict[str, Any]:
+    require_kb_permission(request, user, KB_READ_PERMISSION, action="kb.v2.retrieve", resource_type="knowledge_base", resource_id=payload.base_id)
+    ensure_base_exists(payload.base_id, user=user, request=request, action="kb.v2.retrieve")
+    graph_state = run_retrieval_graph(
+        {
+            "base_id": payload.base_id,
+            "question": payload.question,
+            "document_ids": payload.document_ids,
+            "limit": payload.limit,
+        }
+    )
+    result = graph_state["result"]
+    degraded = "true" if result.stats.degraded_signals else "false"
+    KB_RETRIEVE_REQUESTS_TOTAL.labels("success", degraded).inc()
+    KB_RETRIEVE_LATENCY_MS.observe(float(result.stats.retrieval_ms))
+    return {
+        "items": [serialize_evidence(item, corpus_id=f"kb:{payload.base_id}") for item in result.items],
+        "retrieval": result.stats.as_dict(),
+        "trace_id": current_trace_id(),
+        "graph": _graph_meta(entrypoint="prepare_request", final_node="fuse_and_rerank"),
     }
 
 
@@ -146,6 +179,13 @@ async def query_kb(payload: KBQueryRequest, request: Request, user: CurrentUser)
                 "safety_reason_codes": list(safety.get("reason_codes") or []),
             },
         )
+    return result
+
+
+@router.post("/api/v2/kb/query")
+async def query_kb_v2(payload: KBQueryRequest, request: Request, user: CurrentUser) -> dict[str, Any]:
+    result = await query_kb(payload, request, user)
+    result["graph"] = _graph_meta(entrypoint="prepare_query_response", final_node="finalize_query_response")
     return result
 
 

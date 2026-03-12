@@ -4,6 +4,7 @@ fastapi==0.115.8
 httpx==0.28.1
 langchain-community==0.3.30
 langchain-core==0.3.83
+langgraph==0.5.4
 langchain-openai==0.3.35
 langchain-qdrant==0.2.1
 prometheus-client==0.21.1

@@ -37,6 +37,10 @@ class CreateSessionRequest(BaseModel):
         return normalized
 
 
+class CreateThreadRequest(CreateSessionRequest):
+    pass
+
+
 class UpdateSessionRequest(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     scope: ChatScopePayload | None = None
@@ -69,8 +73,22 @@ class SendMessageRequest(BaseModel):
         return normalized
 
 
+class CreateRunRequest(SendMessageRequest):
+    pass
+
+
 class RetryWorkflowRunRequest(BaseModel):
     reuse_scope: bool = True
+
+
+class SubmitInterruptRequest(BaseModel):
+    question: str = Field(default="", max_length=12000)
+    allow_common_knowledge: bool | None = None
+
+    @field_validator("question")
+    @classmethod
+    def normalize_question(cls, value: str) -> str:
+        return value.strip()
 
 
 class MessageFeedbackRequest(BaseModel):

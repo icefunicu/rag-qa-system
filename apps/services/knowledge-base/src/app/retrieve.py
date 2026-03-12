@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from functools import lru_cache
+from typing import Any, TypedDict
 
+from langgraph.graph import END, StateGraph
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
-from langchain_core.runnables import RunnableLambda
 from pydantic import ConfigDict
 from shared.logging import setup_logging
 from shared.query_rewrite import rewrite_query
@@ -24,6 +25,20 @@ FUSION_WEIGHTS = {
     "fts": 1.0,
     "vector": 0.9,
 }
+
+
+class RetrievalGraphState(TypedDict, total=False):
+    started: float
+    base_id: str
+    question: str
+    limit: int
+    document_ids: list[str]
+    rewrite: Any
+    doc_ids: list[str]
+    signal_documents: dict[str, list[Document]]
+    degraded_signals: list[str]
+    warnings: list[str]
+    result: RetrievalResult
 
 
 class StructureRetriever(BaseRetriever):
@@ -161,15 +176,31 @@ def retrieve_kb_result(
     document_ids: list[str] | None = None,
     limit: int = 8,
 ) -> RetrievalResult:
-    chain = RunnableLambda(_prepare_request) | RunnableLambda(_run_signal_retrievers) | RunnableLambda(_fuse_and_rerank)
-    return chain.invoke(
+    return run_retrieval_graph(
         {
             "base_id": base_id,
             "question": question,
             "document_ids": list(document_ids or []),
             "limit": limit,
         }
-    )
+    )["result"]
+
+
+def run_retrieval_graph(payload: dict[str, Any]) -> RetrievalGraphState:
+    return _retrieval_graph().invoke(payload)
+
+
+@lru_cache(maxsize=1)
+def _retrieval_graph():
+    graph = StateGraph(RetrievalGraphState)
+    graph.add_node("prepare_request", _prepare_request)
+    graph.add_node("run_signal_retrievers", _run_signal_retrievers)
+    graph.add_node("fuse_and_rerank", _fuse_and_rerank_node)
+    graph.set_entry_point("prepare_request")
+    graph.add_edge("prepare_request", "run_signal_retrievers")
+    graph.add_edge("run_signal_retrievers", "fuse_and_rerank")
+    graph.add_edge("fuse_and_rerank", END)
+    return graph.compile()
 
 
 def _prepare_request(payload: dict[str, Any]) -> dict[str, Any]:
@@ -347,6 +378,10 @@ def _fuse_and_rerank(state: dict[str, Any]) -> RetrievalResult:
         rerank_provider=rerank_provider,
     )
     return RetrievalResult(items=evidence, stats=stats)
+
+
+def _fuse_and_rerank_node(state: dict[str, Any]) -> dict[str, RetrievalResult]:
+    return {"result": _fuse_and_rerank(state)}
 
 
 def _resolve_document_ids(*, base_id: str, document_ids: list[str]) -> list[str]:

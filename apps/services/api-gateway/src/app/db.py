@@ -19,6 +19,10 @@ class GatewayDatabase:
         self._dsn = dsn
         self._migrations_dir = migrations_dir
 
+    @property
+    def dsn(self) -> str:
+        return self._dsn
+
     @contextmanager
     def connect(self) -> Iterator[psycopg.Connection]:
         with psycopg.connect(self._dsn, row_factory=dict_row) as conn:
